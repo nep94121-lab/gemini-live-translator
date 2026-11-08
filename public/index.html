@@ -2,7 +2,11 @@
 <html lang="vi">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0b0f19" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="manifest" href="/manifest.json" />
   <title>Gemini Live Phiên Dịch (Việt → Anh)</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
@@ -29,7 +33,7 @@
     <section class="panel">
       <div class="panel-head">
         <span class="panel-title">🇻🇳 Tiếng Việt</span>
-        <span class="panel-tag" id="vnStatusTag">Đã bật lọc ồn &amp; khử "à, ừm"</span>
+        <span class="panel-tag" id="vnStatusTag">Đã bật chạy nền &amp; khử "à, ừm"</span>
       </div>
       <div class="transcript-box" id="vnTranscriptBox">
         <div class="empty-hint">Câu nói tiếng Việt hiển thị tại đây...</div>
@@ -76,12 +80,12 @@
 
       <!-- Tùy chọn mở rộng được thu gọn để giao diện chính luôn sạch gọn -->
       <details class="more-settings">
-        <summary>Tùy chỉnh nâng cao &amp; Gõ thử nhanh</summary>
+        <summary>Tùy chỉnh nâng cao &amp; Chế độ tắt màn hình</summary>
         <div class="more-body">
           <div class="more-row">
             <label class="chk-label">
               <input type="checkbox" id="chkBackgroundMode" checked />
-              <span>Chạy nền</span>
+              <span>Giữ chạy khi tắt màn hình</span>
             </label>
             <label class="chk-label">
               <input type="checkbox" id="chkFilterFillers" checked />

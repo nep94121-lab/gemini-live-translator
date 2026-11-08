@@ -24,11 +24,16 @@ const bgKeepAliveAudio = document.getElementById('bgKeepAliveAudio');
 
 let liveClientSession = null;
 let isRecording = false;
+let isReconnecting = false;
 let micContext = null;
 let playbackContext = null;
+let playbackStreamDest = null;
+let keepAliveOscillator = null;
 let micStream = null;
 let workletNode = null;
 let wakeLockSentinel = null;
+let webLockRelease = null;
+let watchdogInterval = null;
 let nextPlayTime = 0;
 let activeAudioSources = [];
 let playbackSpeed = parseFloat(speedSlider.value) || 1.2;
@@ -79,15 +84,44 @@ function base64ToInt16Array(base64) {
   return new Int16Array(bytes.buffer);
 }
 
-function schedulePcm24kPlayback(base64Data) {
+/**
+ * Khởi tạo AudioContext phát 24kHz có gắn sóng hạ âm giữ thức (-75dB)
+ * và kết nối cả MediaStream vào thẻ <audio> để khi khóa màn hình điện thoại
+ * hệ điều hành vẫn cấp quyền phát loa liên tục.
+ */
+function ensurePlaybackContext() {
   if (!playbackContext) {
     playbackContext = new (window.AudioContext || window.webkitAudioContext)({
       sampleRate: 24000,
     });
+
+    // Tạo sóng hạ âm biên độ cực nhỏ (-75dB) để phần cứng âm thanh điện thoại không bao giờ tự đóng băng
+    try {
+      const osc = playbackContext.createOscillator();
+      const gain = playbackContext.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 24;
+      gain.gain.value = 0.00018;
+      osc.connect(gain);
+      gain.connect(playbackContext.destination);
+
+      if (typeof playbackContext.createMediaStreamDestination === 'function') {
+        playbackStreamDest = playbackContext.createMediaStreamDestination();
+        gain.connect(playbackStreamDest);
+      }
+      osc.start();
+      keepAliveOscillator = osc;
+    } catch {}
   }
+
   if (playbackContext.state === 'suspended') {
-    playbackContext.resume();
+    playbackContext.resume().catch(() => {});
   }
+  return playbackContext;
+}
+
+function schedulePcm24kPlayback(base64Data) {
+  const ctx = ensurePlaybackContext();
 
   const pcm16 = base64ToInt16Array(base64Data);
   if (pcm16.length === 0) return;
@@ -97,15 +131,22 @@ function schedulePcm24kPlayback(base64Data) {
     float32[i] = pcm16[i] / 32768;
   }
 
-  const audioBuffer = playbackContext.createBuffer(1, float32.length, 24000);
+  const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
   audioBuffer.getChannelData(0).set(float32);
 
-  const source = playbackContext.createBufferSource();
+  const source = ctx.createBufferSource();
   source.buffer = audioBuffer;
   source.playbackRate.value = playbackSpeed;
-  source.connect(playbackContext.destination);
+  source.connect(ctx.destination);
 
-  const now = playbackContext.currentTime;
+  // Đồng thời đẩy vào MediaStream của thẻ <audio> nếu đang chạy nền trên màn hình khóa
+  if (playbackStreamDest && document.visibilityState === 'hidden') {
+    try {
+      source.connect(playbackStreamDest);
+    } catch {}
+  }
+
+  const now = ctx.currentTime;
   const startAt = Math.max(now, nextPlayTime);
   source.start(startAt);
 
@@ -185,49 +226,82 @@ function recordTurnLatency(ttfaMs, totalMs, previewText) {
   latencyList.prepend(row);
 }
 
+/**
+ * Tạo WAV có tín hiệu dither khác 0 (-75dB) để hệ điều hành điện thoại
+ * không nhận diện là "im lặng giả" khi người dùng ấn nút nguồn tắt màn hình.
+ */
+function buildNonZeroKeepAliveWavUrl() {
+  const sampleRate = 8000;
+  const seconds = 2;
+  const numSamples = sampleRate * seconds;
+  const buffer = new ArrayBuffer(44 + numSamples * 2);
+  const view = new DataView(buffer);
+  const writeStr = (offset, str) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+  };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + numSamples * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, numSamples * 2, true);
+
+  // Ghi sóng âm biên độ cực nhỏ (±3 LSB ~ -78dB) để OS Media Player giữ CPU thức
+  for (let i = 0; i < numSamples; i++) {
+    const sample = i % 2 === 0 ? 3 : -3;
+    view.setInt16(44 + i * 2, sample, true);
+  }
+
+  const blob = new Blob([buffer], { type: 'audio/wav' });
+  return URL.createObjectURL(blob);
+}
+
 async function enableBackgroundKeepAlive() {
   if (!chkBackgroundMode.checked) return;
 
+  ensurePlaybackContext();
+
+  // 1. Giữ Web Lock ngăn trình duyệt đóng băng tab khi tắt màn hình
+  if (navigator.locks && typeof navigator.locks.request === 'function' && !webLockRelease) {
+    navigator.locks.request('gemini_live_translator_active_lock', () => {
+      return new Promise((resolve) => {
+        webLockRelease = resolve;
+      });
+    }).catch(() => {});
+  }
+
+  // 2. Screen Wake Lock API khi màn hình đang bật
   if ('wakeLock' in navigator && document.visibilityState === 'visible') {
     try {
       wakeLockSentinel = await navigator.wakeLock.request('screen');
     } catch {}
   }
 
-  if (bgKeepAliveAudio && !bgKeepAliveAudio.src) {
-    const sampleRate = 8000;
-    const numSamples = sampleRate;
-    const buffer = new ArrayBuffer(44 + numSamples * 2);
-    const view = new DataView(buffer);
-    const writeStr = (offset, str) => {
-      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-    };
-    writeStr(0, 'RIFF');
-    view.setUint32(4, 36 + numSamples * 2, true);
-    writeStr(8, 'WAVE');
-    writeStr(12, 'fmt ');
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeStr(36, 'data');
-    view.setUint32(40, numSamples * 2, true);
-    const blob = new Blob([buffer], { type: 'audio/wav' });
-    bgKeepAliveAudio.src = URL.createObjectURL(blob);
+  // 3. Phát thẻ <audio> với WAV khác 0 để kích hoạt MediaSession trên màn hình khóa điện thoại
+  if (bgKeepAliveAudio) {
+    if (!bgKeepAliveAudio.src) {
+      bgKeepAliveAudio.src = buildNonZeroKeepAliveWavUrl();
+    }
+    bgKeepAliveAudio.volume = 0.02;
+    try {
+      await bgKeepAliveAudio.play();
+    } catch {}
   }
-
-  try {
-    await bgKeepAliveAudio.play();
-  } catch {}
 
   if ('mediaSession' in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({
-      title: 'Phiên Dịch Gemini Live (Việt → Anh)',
-      artist: 'Đang thu âm & dịch trong nền',
+      title: 'Đang Phiên Dịch Việt → Anh',
+      artist: 'Gemini Live (Chạy nền khi tắt màn hình)',
+      album: 'Gemini Live Translator',
     });
+    navigator.mediaSession.playbackState = 'playing';
     navigator.mediaSession.setActionHandler('pause', () => {
       if (isRecording) stopLiveSession();
     });
@@ -235,18 +309,44 @@ async function enableBackgroundKeepAlive() {
       if (!isRecording) startLiveSession();
     });
   }
+
+  // 4. Bộ canh gác (Watchdog) 2 giây/lần tự động đánh thức AudioContext & nối lại WebSocket nếu tắt màn hình
+  if (watchdogInterval) clearInterval(watchdogInterval);
+  watchdogInterval = setInterval(async () => {
+    if (!isRecording) return;
+
+    if (micContext && micContext.state === 'suspended') {
+      micContext.resume().catch(() => {});
+    }
+    if (playbackContext && playbackContext.state === 'suspended') {
+      playbackContext.resume().catch(() => {});
+    }
+    if (bgKeepAliveAudio && bgKeepAliveAudio.paused && chkBackgroundMode.checked) {
+      bgKeepAliveAudio.play().catch(() => {});
+    }
+    if (!liveClientSession && !isReconnecting) {
+      isReconnecting = true;
+      try {
+        setStatus('idle', 'Đang tự kết nối lại...');
+        liveClientSession = await connectDirectGeminiLive();
+      } catch {} finally {
+        isReconnecting = false;
+      }
+    }
+  }, 2000);
 }
 
 document.addEventListener('visibilitychange', async () => {
-  if (isRecording && chkBackgroundMode.checked) {
-    if (document.visibilityState === 'visible' && 'wakeLock' in navigator) {
-      try {
-        wakeLockSentinel = await navigator.wakeLock.request('screen');
-      } catch {}
-    }
-    if (micContext?.state === 'suspended') micContext.resume();
-    if (playbackContext?.state === 'suspended') playbackContext.resume();
+  if (!isRecording || !chkBackgroundMode.checked) return;
+
+  if (document.visibilityState === 'visible' && 'wakeLock' in navigator) {
+    try {
+      wakeLockSentinel = await navigator.wakeLock.request('screen');
+    } catch {}
   }
+  if (micContext?.state === 'suspended') micContext.resume().catch(() => {});
+  if (playbackContext?.state === 'suspended') playbackContext.resume().catch(() => {});
+  if (bgKeepAliveAudio?.paused) bgKeepAliveAudio.play().catch(() => {});
 });
 
 function handleServerResponse(response) {
@@ -397,6 +497,7 @@ async function connectDirectGeminiLive() {
         setStatus('error', err?.message || 'Lỗi kết nối Live API');
       },
       onclose: () => {
+        liveClientSession = null;
         if (!isRecording) {
           setStatus('idle', 'Đã ngắt kết nối');
         }
@@ -411,6 +512,7 @@ async function connectDirectGeminiLive() {
 async function startLiveSession() {
   try {
     setStatus('idle', 'Đang kết nối...');
+    await enableBackgroundKeepAlive();
     liveClientSession = await connectDirectGeminiLive();
 
     micStream = await navigator.mediaDevices.getUserMedia({
@@ -469,12 +571,10 @@ async function startLiveSession() {
     highPass.connect(lowPass);
     lowPass.connect(workletNode);
 
-    await enableBackgroundKeepAlive();
-
     isRecording = true;
     btnToggleMic.classList.add('recording');
-    micBtnLabel.textContent = 'Đang Bật Mic (Ấn Để Dừng)';
-    setStatus('active', 'Đang nghe & dịch');
+    micBtnLabel.textContent = 'Đang Bật Mic Chạy Nền (Ấn Để Dừng)';
+    setStatus('active', 'Đang nghe & chạy nền');
   } catch (err) {
     isRecording = false;
     btnToggleMic.classList.remove('recording');
@@ -489,6 +589,14 @@ async function stopLiveSession() {
   micBtnLabel.textContent = 'Ấn Để Bật Mic Nói';
   setStatus('idle', 'Đã dừng');
 
+  if (watchdogInterval) {
+    clearInterval(watchdogInterval);
+    watchdogInterval = null;
+  }
+  if (webLockRelease) {
+    webLockRelease();
+    webLockRelease = null;
+  }
   if (workletNode) {
     workletNode.disconnect();
     workletNode = null;
@@ -507,6 +615,9 @@ async function stopLiveSession() {
   }
   if (bgKeepAliveAudio) {
     bgKeepAliveAudio.pause();
+  }
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.playbackState = 'paused';
   }
   if (liveClientSession) {
     try {

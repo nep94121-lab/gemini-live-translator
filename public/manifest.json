@@ -1,0 +1,10 @@
+{
+  "name": "Phiên Dịch Gemini Live (Việt → Anh)",
+  "short_name": "Dịch Live",
+  "description": "Phiên dịch trực tiếp Việt sang Anh bằng Gemini Live API hỗ trợ chạy nền khi tắt màn hình",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0f19",
+  "theme_color": "#0b0f19",
+  "orientation": "portrait"
+}
