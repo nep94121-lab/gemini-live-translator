@@ -33,6 +33,10 @@ export function createTranslatorServer(options = {}) {
   app.use(express.json());
   app.use(express.static(path.join(__dirname, 'public')));
 
+  app.get('/', (_req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  });
+
   app.get('/api/config', (_req, res) => {
     res.json({
       hasConfiguredKey: Boolean(apiKey),
@@ -346,10 +350,12 @@ export function createTranslatorServer(options = {}) {
   return { app, server, wss };
 }
 
+const defaultInstance = createTranslatorServer();
+export default defaultInstance.app;
+
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
   const port = Number(process.env.PORT || 3030);
-  const { server } = createTranslatorServer();
-  server.listen(port, () => {
+  defaultInstance.server.listen(port, () => {
     console.log(`Gemini Live Translator running at http://localhost:${port}`);
   });
 }
