@@ -24,6 +24,7 @@ const bgKeepAliveAudio = document.getElementById('bgKeepAliveAudio');
 
 let liveClientSession = null;
 let isRecording = false;
+let isStarting = false;
 let isReconnecting = false;
 let micContext = null;
 let playbackContext = null;
@@ -42,8 +43,48 @@ let turnCounter = 0;
 let currentTurnStartMs = null;
 let currentTurnFirstByteMs = null;
 let currentVnItem = null;
+let currentVnRawText = '';
 let currentEnItem = null;
 const latencyHistory = [];
+const btnCopyTranslation = document.getElementById('btnCopyTranslation');
+const sessionDetails = document.getElementById('sessionDetails');
+const btnOpenSettings = document.getElementById('btnOpenSettings');
+const inputMeter = document.querySelector('.input-meter');
+const feedback = document.getElementById('feedback');
+let feedbackTimer;
+
+function showFeedback(message) {
+  clearTimeout(feedbackTimer);
+  feedback.textContent = message;
+  feedbackTimer = setTimeout(() => { feedback.textContent = ''; }, 3000);
+}
+
+function setInputLevel(rms = 0) {
+  inputMeter.style.setProperty('--input-level', Math.min(1, Math.max(0, rms * 14)));
+}
+
+btnOpenSettings.addEventListener('click', () => {
+  sessionDetails.open = !sessionDetails.open;
+  if (sessionDetails.open) {
+    sessionDetails.scrollIntoView({ block: 'nearest' });
+    sessionDetails.querySelector('summary').focus({ preventScroll: true });
+  }
+});
+sessionDetails.addEventListener('toggle', () => {
+  btnOpenSettings.setAttribute('aria-expanded', String(sessionDetails.open));
+});
+
+btnCopyTranslation.addEventListener('click', async () => {
+  const text = [...enTranscriptBox.querySelectorAll('.utterance-text')]
+    .map((item) => item.textContent).join('\n\n');
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    showFeedback('Đã sao chép bản dịch.');
+  } catch {
+    showFeedback('Chưa sao chép được. Bạn có thể chọn và sao chép văn bản.');
+  }
+});
 
 const STANDALONE_FILLER_REGEX = /^[\s,.;:!?…\-–—]*(?:à+|ừ+|ờ+|ừm+|ờm+|ưm+|ạ+|ơ+|hơ+|ạ\s*ừm+|à\s*ừm+|à\s*ừ+|uh+|um+|hmm+)[\s,.;:!?…\-–—]*$/i;
 const TOKEN_FILLER_REGEX = /(?:^|(?<=[\s,.;:!?…\-–—]))(?:ạ\s+ừm+|à\s+ừm+|à\s+ừ+|ừ\s+à+|ừm+|ờm+|ưm+|à+|ừ+|ờ+|uh+|um+|hmm+)(?=$|[\s,.;:!?…\-–—])/giu;
@@ -53,7 +94,12 @@ export function cleanClientFillers(rawText, enabled = true) {
   if (!enabled) return rawText.trim();
   let t = rawText.trim();
   if (!t || STANDALONE_FILLER_REGEX.test(t)) return '';
-  t = t.replace(TOKEN_FILLER_REGEX, ' ').replace(/\s{2,}/g, ' ').trim();
+  t = t
+    .replace(TOKEN_FILLER_REGEX, ' ')
+    .replace(/\s+([,.;:!?])/g, '$1')
+    .replace(/^[,.;:!?…\-–—\s]+/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
   if (!t || STANDALONE_FILLER_REGEX.test(t)) return '';
   return t.charAt(0).toUpperCase() + t.slice(1);
 }
@@ -95,7 +141,6 @@ function ensurePlaybackContext() {
       sampleRate: 24000,
     });
 
-    // Tạo sóng hạ âm biên độ cực nhỏ (-75dB) để phần cứng âm thanh điện thoại không bao giờ tự đóng băng
     try {
       const osc = playbackContext.createOscillator();
       const gain = playbackContext.createGain();
@@ -139,7 +184,6 @@ function schedulePcm24kPlayback(base64Data) {
   source.playbackRate.value = playbackSpeed;
   source.connect(ctx.destination);
 
-  // Đồng thời đẩy vào MediaStream của thẻ <audio> nếu đang chạy nền trên màn hình khóa
   if (playbackStreamDest && document.visibilityState === 'hidden') {
     try {
       source.connect(playbackStreamDest);
@@ -171,13 +215,16 @@ function clearAudioQueue() {
   }
 }
 
-function appendOrUpdateUtterance(box, currentItem, text, tagLabel) {
+function appendOrUpdateUtterance(box, currentItem, text, tagLabel, replaceFull = false) {
   const hint = box.querySelector('.empty-hint');
   if (hint) hint.remove();
+
+  if (box === enTranscriptBox) btnCopyTranslation.disabled = false;
 
   if (!currentItem) {
     const item = document.createElement('div');
     item.className = 'utterance-item';
+    item.dataset.rawText = text;
     const contentSpan = document.createElement('span');
     contentSpan.className = 'utterance-text';
     contentSpan.textContent = text.trim();
@@ -191,9 +238,20 @@ function appendOrUpdateUtterance(box, currentItem, text, tagLabel) {
     return item;
   } else {
     const contentSpan = currentItem.querySelector('.utterance-text');
-    const prev = contentSpan.textContent;
-    const sep = prev.endsWith(' ') || text.startsWith(' ') ? '' : ' ';
-    contentSpan.textContent = `${prev}${sep}${text}`.replace(/\s{2,}/g, ' ').trim();
+    if (replaceFull) {
+      currentItem.dataset.rawText = text;
+      contentSpan.textContent = text.trim();
+    } else {
+      const prevRaw = currentItem.dataset.rawText ?? contentSpan.textContent;
+      const needsSpace =
+        prevRaw.length > 0 &&
+        !/\s$/.test(prevRaw) &&
+        !/^\s/.test(text) &&
+        !/^[,.;:!?…'")\]]/.test(text);
+      const combinedRaw = `${prevRaw}${needsSpace ? ' ' : ''}${text}`;
+      currentItem.dataset.rawText = combinedRaw;
+      contentSpan.textContent = combinedRaw.replace(/\s{2,}/g, ' ').trim();
+    }
     box.scrollTop = box.scrollHeight;
     return currentItem;
   }
@@ -219,10 +277,12 @@ function recordTurnLatency(ttfaMs, totalMs, previewText) {
     ? previewText.slice(0, 26) + (previewText.length > 26 ? '…' : '')
     : `Câu #${turnCounter}`;
 
-  row.innerHTML = `
-    <span><strong>#${turnCounter}</strong> ${shortText}</span>
-    <span class="latency-ms">${safeTtfa} ms (Tổng: ${safeTotal} ms)</span>
-  `;
+  const preview = document.createElement('span');
+  preview.textContent = `#${turnCounter} ${shortText}`;
+  const timing = document.createElement('span');
+  timing.className = 'latency-ms';
+  timing.textContent = `${safeTtfa} ms (Tổng: ${safeTotal} ms)`;
+  row.append(preview, timing);
   latencyList.prepend(row);
 }
 
@@ -253,7 +313,6 @@ function buildNonZeroKeepAliveWavUrl() {
   writeStr(36, 'data');
   view.setUint32(40, numSamples * 2, true);
 
-  // Ghi sóng âm biên độ cực nhỏ (±3 LSB ~ -78dB) để OS Media Player giữ CPU thức
   for (let i = 0; i < numSamples; i++) {
     const sample = i % 2 === 0 ? 3 : -3;
     view.setInt16(44 + i * 2, sample, true);
@@ -268,7 +327,6 @@ async function enableBackgroundKeepAlive() {
 
   ensurePlaybackContext();
 
-  // 1. Giữ Web Lock ngăn trình duyệt đóng băng tab khi tắt màn hình
   if (navigator.locks && typeof navigator.locks.request === 'function' && !webLockRelease) {
     navigator.locks.request('gemini_live_translator_active_lock', () => {
       return new Promise((resolve) => {
@@ -277,14 +335,12 @@ async function enableBackgroundKeepAlive() {
     }).catch(() => {});
   }
 
-  // 2. Screen Wake Lock API khi màn hình đang bật
   if ('wakeLock' in navigator && document.visibilityState === 'visible') {
     try {
       wakeLockSentinel = await navigator.wakeLock.request('screen');
     } catch {}
   }
 
-  // 3. Phát thẻ <audio> với WAV khác 0 để kích hoạt MediaSession trên màn hình khóa điện thoại
   if (bgKeepAliveAudio) {
     if (!bgKeepAliveAudio.src) {
       bgKeepAliveAudio.src = buildNonZeroKeepAliveWavUrl();
@@ -310,7 +366,6 @@ async function enableBackgroundKeepAlive() {
     });
   }
 
-  // 4. Bộ canh gác (Watchdog) 2 giây/lần tự động đánh thức AudioContext & nối lại WebSocket nếu tắt màn hình
   if (watchdogInterval) clearInterval(watchdogInterval);
   watchdogInterval = setInterval(async () => {
     if (!isRecording) return;
@@ -383,9 +438,16 @@ function handleServerResponse(response) {
 
   if (content.inputTranscription?.text) {
     const rawVn = content.inputTranscription.text;
-    const cleanedVn = cleanClientFillers(rawVn, chkFilterFillers.checked);
-    if (rawVn.trim().length > 0 && cleanedVn.length === 0) {
-      vnStatusTag.textContent = `Đã lọc từ đệm: "${rawVn.trim()}"`;
+    const needsSpace =
+      currentVnRawText.length > 0 &&
+      !/\s$/.test(currentVnRawText) &&
+      !/^\s/.test(rawVn) &&
+      !/^[,.;:!?…'")\]]/.test(rawVn);
+    currentVnRawText = `${currentVnRawText}${needsSpace ? ' ' : ''}${rawVn}`;
+    const cleanedVn = cleanClientFillers(currentVnRawText, chkFilterFillers.checked);
+
+    if (currentVnRawText.trim().length > 0 && cleanedVn.length === 0) {
+      vnStatusTag.textContent = `Đã lọc từ đệm: "${currentVnRawText.trim()}"`;
     } else if (cleanedVn) {
       if (!currentTurnStartMs) currentTurnStartMs = now;
       vnStatusTag.textContent = 'Đang nhận tiếng Việt';
@@ -393,7 +455,8 @@ function handleServerResponse(response) {
         vnTranscriptBox,
         currentVnItem,
         cleanedVn,
-        `#${turnCounter + 1}`
+        `#${turnCounter + 1}`,
+        true
       );
     }
   }
@@ -431,11 +494,20 @@ function handleServerResponse(response) {
     currentTurnStartMs = null;
     currentTurnFirstByteMs = null;
     currentVnItem = null;
+    currentVnRawText = '';
     currentEnItem = null;
   }
 }
 
 async function connectDirectGeminiLive() {
+  if (liveClientSession) {
+    const prev = liveClientSession;
+    liveClientSession = null;
+    try {
+      prev.close();
+    } catch {}
+  }
+
   const model = modelSelect.value;
   const res = await fetch('/api/ephemeral-token', {
     method: 'POST',
@@ -483,33 +555,42 @@ async function connectDirectGeminiLive() {
         sessionResumption: {},
       };
 
+  let sessionRef = null;
   const session = await ai.live.connect({
     model,
     config: liveConfig,
     callbacks: {
       onopen: () => {
-        setStatus('active', 'Đã kết nối Live API');
+        setStatus('active', 'Đã kết nối');
       },
       onmessage: (response) => {
         handleServerResponse(response);
       },
       onerror: (err) => {
-        setStatus('error', err?.message || 'Lỗi kết nối Live API');
+        setStatus('error', err?.message || 'Lỗi kết nối phiên dịch');
       },
       onclose: () => {
-        liveClientSession = null;
-        if (!isRecording) {
-          setStatus('idle', 'Đã ngắt kết nối');
+        if (!sessionRef || liveClientSession === sessionRef) {
+          liveClientSession = null;
+          if (!isRecording) {
+            setStatus('idle', 'Đã ngắt kết nối');
+          }
         }
       },
     },
   });
+  sessionRef = session;
 
-  setStatus('active', 'Đã kết nối Live API');
+  setStatus('active', 'Đã kết nối');
   return session;
 }
 
 async function startLiveSession() {
+  if (isStarting || isRecording) return;
+  isStarting = true;
+  btnToggleMic.disabled = true;
+  btnToggleMic.setAttribute('aria-busy', 'true');
+  micBtnLabel.textContent = 'Đang nối…';
   try {
     setStatus('idle', 'Đang kết nối...');
     await enableBackgroundKeepAlive();
@@ -547,6 +628,8 @@ async function startLiveSession() {
 
     workletNode.port.onmessage = (event) => {
       const data = event.data;
+      if (data.type === 'pcm_chunk' || data.type === 'speech_start') setInputLevel(data.rms);
+      if (data.type === 'speech_end') setInputLevel(0);
       if (!liveClientSession) return;
 
       if (data.type === 'speech_start') {
@@ -573,21 +656,32 @@ async function startLiveSession() {
 
     isRecording = true;
     btnToggleMic.classList.add('recording');
-    micBtnLabel.textContent = 'Đang Bật Mic Chạy Nền (Ấn Để Dừng)';
-    setStatus('active', 'Đang nghe & chạy nền');
+    micBtnLabel.textContent = 'Dừng mic';
+    btnToggleMic.setAttribute('aria-pressed', 'true');
+    setStatus('active', 'Đang nghe');
   } catch (err) {
-    isRecording = false;
-    btnToggleMic.classList.remove('recording');
-    micBtnLabel.textContent = 'Ấn Để Bật Mic Nói';
-    setStatus('error', err?.message || 'Không thể bật Mic');
+    await stopLiveSession();
+    setStatus('error', err?.message || 'Không thể bật mic. Hãy kiểm tra quyền truy cập.');
+  } finally {
+    isStarting = false;
+    btnToggleMic.disabled = false;
+    btnToggleMic.setAttribute('aria-busy', 'false');
   }
 }
 
 async function stopLiveSession() {
   isRecording = false;
+  btnToggleMic.setAttribute('aria-pressed', 'false');
+  setInputLevel(0);
   btnToggleMic.classList.remove('recording');
-  micBtnLabel.textContent = 'Ấn Để Bật Mic Nói';
+  micBtnLabel.textContent = 'Bật mic';
   setStatus('idle', 'Đã dừng');
+  vnStatusTag.textContent = 'Tiếng Việt';
+  currentTurnStartMs = null;
+  currentTurnFirstByteMs = null;
+  currentVnItem = null;
+  currentVnRawText = '';
+  currentEnItem = null;
 
   if (watchdogInterval) {
     clearInterval(watchdogInterval);
@@ -620,10 +714,11 @@ async function stopLiveSession() {
     navigator.mediaSession.playbackState = 'paused';
   }
   if (liveClientSession) {
-    try {
-      liveClientSession.close();
-    } catch {}
+    const prev = liveClientSession;
     liveClientSession = null;
+    try {
+      prev.close();
+    } catch {}
   }
   clearAudioQueue();
 }
@@ -638,7 +733,8 @@ btnToggleMic.addEventListener('click', () => {
 
 speedSlider.addEventListener('input', () => {
   playbackSpeed = parseFloat(speedSlider.value) || 1.2;
-  speedValueLabel.textContent = `${playbackSpeed.toFixed(2)}x`;
+  speedValueLabel.textContent = `${playbackSpeed.toFixed(2)}×`;
+  speedSlider.setAttribute('aria-valuetext', `${playbackSpeed.toFixed(2)} lần`);
   for (const src of activeAudioSources) {
     try {
       src.playbackRate.value = playbackSpeed;
@@ -654,10 +750,31 @@ noiseGateSlider.addEventListener('input', () => {
   }
 });
 
+modelSelect.addEventListener('change', async () => {
+  if (!liveClientSession) return;
+  try {
+    setStatus('idle', 'Đang chuyển mô hình...');
+    liveClientSession = await connectDirectGeminiLive();
+    if (isRecording) {
+      setStatus('active', 'Đang nghe');
+    }
+  } catch (err) {
+    setStatus('error', err?.message || 'Không thể chuyển mô hình');
+  }
+});
+
 btnClearHistory.addEventListener('click', () => {
-  vnTranscriptBox.innerHTML = '<div class="empty-hint">Câu nói tiếng Việt hiển thị tại đây...</div>';
-  enTranscriptBox.innerHTML = '<div class="empty-hint">Bản dịch tiếng Anh hiển thị tại đây...</div>';
-  latencyList.innerHTML = '<div class="empty-hint">Độ trễ từng câu (ms) sẽ hiện ở đây...</div>';
+  vnTranscriptBox.innerHTML = '<p class="empty-hint">Bật mic.<br />Nói điều bạn muốn.</p>';
+  enTranscriptBox.innerHTML = '<p class="empty-hint">Your words,<br />in English.</p>';
+  latencyList.innerHTML = '<p class="empty-hint">Có bản dịch đầu tiên, độ trễ sẽ hiển thị ở đây.</p>';
+  currentVnItem = null;
+  currentVnRawText = '';
+  currentEnItem = null;
+  currentTurnStartMs = null;
+  currentTurnFirstByteMs = null;
+  btnCopyTranslation.disabled = true;
+  vnStatusTag.textContent = 'Tiếng Việt';
+  enStatusTag.textContent = 'Bản dịch được đọc tự động khi có phản hồi.';
   latencyHistory.length = 0;
   turnCounter = 0;
   avgLatencyLabel.textContent = 'TB: -- ms';
@@ -687,6 +804,7 @@ quickTextForm.addEventListener('submit', async (e) => {
 
   currentTurnStartMs = performance.now();
   currentTurnFirstByteMs = null;
+  currentVnRawText = '';
   currentVnItem = appendOrUpdateUtterance(
     vnTranscriptBox,
     null,
@@ -695,9 +813,13 @@ quickTextForm.addEventListener('submit', async (e) => {
   );
   currentEnItem = null;
 
-  liveClientSession.sendRealtimeInput({
-    text: cleaned,
-  });
+  try {
+    liveClientSession.sendRealtimeInput({
+      text: cleaned,
+    });
+  } catch (err) {
+    setStatus('error', err?.message || 'Lỗi gửi câu tiếng Việt');
+  }
 });
 
 fetch('/api/config')

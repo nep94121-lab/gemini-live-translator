@@ -2,127 +2,98 @@
 <html lang="vi">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <meta name="theme-color" content="#0b0f19" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#1837e8" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="description" content="Nói tiếng Việt. Nghe và đọc bản dịch tiếng Anh trực tiếp." />
   <link rel="manifest" href="/manifest.json" />
-  <title>Gemini Live Phiên Dịch (Việt → Anh)</title>
+  <link rel="preload" href="/fonts/BeVietnamPro-ExtraBold.ttf" as="font" type="font/ttf" crossorigin />
+  <title>Việt → Anh · Phiên dịch trực tiếp</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
+  <a class="skip-link" href="#btnToggleMic">Đến nút bật mic</a>
   <main class="app-shell">
-    <!-- THANH TRẠNG THÁI & NÚT BẬT MIC GỌN GÀNG -->
     <header class="top-bar">
-      <div class="brand">
-        <span class="brand-dot"></span>
-        <span class="brand-title">Phiên Dịch Việt → Anh</span>
-      </div>
-      <div class="status-badge" id="connectionBadge" data-state="idle">
-        <span class="dot"></span>
-        <span id="connectionText">Sẵn sàng</span>
-      </div>
+      <p class="brand-title">Phiên dịch trực tiếp</p>
+      <button id="btnOpenSettings" class="icon-button settings-button" type="button" aria-label="Mở tùy chỉnh" aria-controls="sessionDetails" aria-expanded="false"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7h11m4 0h3M3 17h3m4 0h11"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg></button>
     </header>
 
-    <button id="btnToggleMic" class="btn-mic" type="button">
-      <span class="mic-icon">🎙️</span>
-      <span id="micBtnLabel">Ấn Để Bật Mic Nói</span>
-    </button>
+    <div class="workspace">
+      <section class="source-panel" aria-labelledby="languageHeading">
+        <h1 class="language-heading" id="languageHeading" aria-label="Phiên dịch tiếng Việt sang tiếng Anh">
+          <span class="language-from" aria-hidden="true">Việt</span>
+          <svg class="language-arrow" viewBox="0 0 180 94" fill="none" aria-hidden="true"><path d="M2 5h66l37 74h69m-15-15 15 15-15 13" stroke="currentColor" stroke-width="3"/></svg>
+          <span class="language-to" aria-hidden="true">Anh</span>
+        </h1>
 
-    <!-- KHUNG 1: TIẾNG VIỆT (Ở TRÊN) -->
-    <section class="panel">
-      <div class="panel-head">
-        <span class="panel-title">🇻🇳 Tiếng Việt</span>
-        <span class="panel-tag" id="vnStatusTag">Đã bật chạy nền &amp; khử "à, ừm"</span>
-      </div>
-      <div class="transcript-box" id="vnTranscriptBox">
-        <div class="empty-hint">Câu nói tiếng Việt hiển thị tại đây...</div>
-      </div>
-    </section>
-
-    <!-- KHUNG 2: TIẾNG ANH (Ở DƯỚI) -->
-    <section class="panel panel-en">
-      <div class="panel-head">
-        <span class="panel-title">🇬🇧 Tiếng Anh (Translation)</span>
-        <span class="panel-tag" id="enStatusTag">Chỉ dịch nguyên nghĩa</span>
-      </div>
-      <div class="transcript-box" id="enTranscriptBox">
-        <div class="empty-hint">Bản dịch tiếng Anh hiển thị tại đây...</div>
-      </div>
-    </section>
-
-    <!-- KHUNG 3: THANH TĂNG TỐC GIỌNG NÓI & ĐỘ TRỄ TỪNG CÂU -->
-    <section class="panel">
-      <div class="speed-row">
-        <label for="speedSlider" class="speed-label">⚡ Tốc độ giọng nói:</label>
-        <input
-          type="range"
-          id="speedSlider"
-          min="0.80"
-          max="2.00"
-          step="0.05"
-          value="1.20"
-        />
-        <strong id="speedValueLabel" class="speed-val">1.20x</strong>
-      </div>
-
-      <div class="latency-head">
-        <span>⏱️ Độ trễ từng câu</span>
-        <div class="latency-actions">
-          <span id="avgLatencyLabel">TB: -- ms</span>
-          <button id="btnClearHistory" class="btn-clear" type="button">Xóa</button>
+        <div class="status-badge" id="connectionBadge" data-state="idle" role="status" aria-live="polite" aria-atomic="true">
+          <span class="dot" aria-hidden="true"></span><span id="connectionText">Sẵn sàng</span>
         </div>
-      </div>
 
-      <div class="latency-list" id="latencyList">
-        <div class="empty-hint">Độ trễ từng câu (ms) sẽ hiện ở đây...</div>
-      </div>
-
-      <!-- Tùy chọn mở rộng được thu gọn để giao diện chính luôn sạch gọn -->
-      <details class="more-settings">
-        <summary>Tùy chỉnh nâng cao &amp; Chế độ tắt màn hình</summary>
-        <div class="more-body">
-          <div class="more-row">
-            <label class="chk-label">
-              <input type="checkbox" id="chkBackgroundMode" checked />
-              <span>Giữ chạy khi tắt màn hình</span>
-            </label>
-            <label class="chk-label">
-              <input type="checkbox" id="chkFilterFillers" checked />
-              <span>Khử "à, ừ, ạ ừm"</span>
-            </label>
-            <select id="modelSelect" class="model-select" aria-label="Model">
-              <option value="gemini-3.8-live">gemini-3.8-live</option>
-              <option value="gemini-3.5-live-translate-preview">gemini-3.5-live-translate-preview</option>
-              <option value="gemini-3.8-live-extended-thinking">gemini-3.8-live-extended-thinking</option>
-            </select>
-          </div>
-          <div class="more-row">
-            <label for="noiseGateSlider">Lọc ồn (Noise Gate):</label>
-            <input
-              type="range"
-              id="noiseGateSlider"
-              min="0.002"
-              max="0.050"
-              step="0.002"
-              value="0.012"
-            />
-            <span id="noiseGateValueLabel">0.012</span>
-          </div>
-          <form id="quickTextForm" class="quick-form">
-            <input
-              type="text"
-              id="quickTextInput"
-              placeholder="Gõ câu tiếng Việt để dịch thử (VD: Bạn tên là gì?)..."
-              autocomplete="off"
-            />
-            <button type="submit" class="btn-send">Dịch</button>
-          </form>
+        <div class="source-heading">
+          <h2>Bạn nói</h2>
+          <span class="panel-tag" id="vnStatusTag">Tiếng Việt</span>
         </div>
-      </details>
-    </section>
+        <div class="transcript-box source-transcript" id="vnTranscriptBox" role="region" aria-label="Nội dung tiếng Việt" tabindex="0">
+          <p class="empty-hint">Bật mic.<br />Nói điều bạn muốn.</p>
+        </div>
+        <div class="input-meter" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+      </section>
+
+      <section class="target-panel" aria-labelledby="translationHeading">
+        <div class="target-head">
+          <h2 id="translationHeading">Bản dịch <span lang="en">/ English</span></h2>
+          <button id="btnCopyTranslation" class="icon-button" type="button" aria-label="Sao chép bản dịch" disabled><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="1"/><path d="M16 8V3H3v13h5"/></svg></button>
+        </div>
+        <div class="transcript-box target-transcript" id="enTranscriptBox" role="region" aria-label="Bản dịch tiếng Anh" lang="en" tabindex="0">
+          <p class="empty-hint">Your words,<br />in English.</p>
+        </div>
+        <p class="translation-note" id="enStatusTag">Bản dịch được đọc tự động khi có phản hồi.</p>
+
+        <div class="control-dock">
+          <div class="speed-row">
+            <label for="speedSlider">Giọng đọc</label>
+            <output id="speedValueLabel" for="speedSlider">1.20×</output>
+            <input type="range" id="speedSlider" min="0.80" max="2.00" step="0.05" value="1.20" aria-valuetext="1.20 lần" />
+          </div>
+          <button id="btnToggleMic" class="btn-mic" type="button" aria-pressed="false">
+            <svg class="icon mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg><svg class="icon stop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg><span id="micBtnLabel">Bật mic</span>
+          </button>
+        </div>
+
+        <details id="sessionDetails" class="session-details">
+          <summary>Chi tiết phiên <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 9 7 7 7-7"/></svg></summary>
+          <div class="details-body">
+            <section class="latency-section" aria-labelledby="latencyHeading">
+              <div class="latency-head"><h3 id="latencyHeading">Độ trễ từng câu</h3><span id="avgLatencyLabel">TB: -- ms</span></div>
+              <div class="latency-list" id="latencyList"><p class="empty-hint">Có bản dịch đầu tiên, độ trễ sẽ hiển thị ở đây.</p></div>
+              <button id="btnClearHistory" class="text-button" type="button">Xóa nội dung phiên</button>
+            </section>
+            <fieldset class="preferences">
+              <legend>Tùy chỉnh</legend>
+              <label class="check-row"><input type="checkbox" id="chkBackgroundMode" checked /><span>Hỗ trợ chạy nền</span></label>
+              <p class="field-help">Hoạt động khi khóa màn hình tùy trình duyệt và thiết bị.</p>
+              <label class="check-row"><input type="checkbox" id="chkFilterFillers" checked /><span>Lọc từ đệm “à, ừm”</span></label>
+              <label class="field-label" for="modelSelect">Mô hình phiên dịch</label>
+              <select id="modelSelect">
+                <option value="gemini-3.8-live">gemini-3.8-live</option>
+                <option value="gemini-3.5-live-translate-preview">gemini-3.5-live-translate-preview</option>
+                <option value="gemini-3.8-live-extended-thinking">gemini-3.8-live-extended-thinking</option>
+              </select>
+              <div class="noise-row"><label for="noiseGateSlider">Ngưỡng lọc ồn</label><output id="noiseGateValueLabel" for="noiseGateSlider">0.012</output><input type="range" id="noiseGateSlider" min="0.002" max="0.050" step="0.002" value="0.012" /></div>
+            </fieldset>
+            <form id="quickTextForm" class="quick-form">
+              <label for="quickTextInput">Hoặc nhập câu tiếng Việt</label>
+              <div class="quick-input-row"><input type="text" id="quickTextInput" placeholder="Bạn muốn nói gì?" autocomplete="off" required maxlength="2000" /><button type="submit">Dịch</button></div>
+            </form>
+          </div>
+        </details>
+      </section>
+    </div>
   </main>
-
+  <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
   <audio id="bgKeepAliveAudio" playsinline loop hidden></audio>
   <script type="module" src="/app.js"></script>
 </body>
