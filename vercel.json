@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "rewrites": [
+    { "source": "/api/config", "destination": "/api/config.js" },
+    { "source": "/api/ephemeral-token", "destination": "/api/ephemeral-token.js" },
+    { "source": "/(.*)", "destination": "/public/$1" }
+  ]
+}
