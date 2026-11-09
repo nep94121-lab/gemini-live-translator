@@ -1,7 +1,5 @@
 node_modules/
 .env
+.env*
 .vercel
 *.log
-
-.vercel
-.env*

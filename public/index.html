@@ -53,6 +53,59 @@
         <p class="translation-note" id="enStatusTag">Bản dịch được đọc tự động khi có phản hồi.</p>
 
         <div class="control-dock">
+          <section class="profile-switcher" aria-labelledby="profileHeading">
+            <div class="profile-heading">
+              <h2 id="profileHeading">Hồ sơ API</h2>
+              <p id="profileHintText">Chọn hồ sơ trước khi bật mic. Xóa cookie hoặc đổi trình duyệt sẽ mất quyền quản lý.</p>
+            </div>
+            <div id="profileBar" class="profile-bar" role="group" aria-label="Chọn hồ sơ API">
+              <div class="profile-item" data-profile-id="default" data-locked="true">
+                <button class="profile-select" type="button" data-profile-id="default" data-locked="true" aria-pressed="true">Tôi</button>
+              </div>
+              <button id="btnAddProfile" class="profile-add" type="button" aria-label="Thêm hồ sơ API mới" aria-controls="profileFormDrawer" aria-expanded="false">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+              </button>
+            </div>
+            <form id="profileFormDrawer" class="profile-drawer" hidden novalidate>
+              <h3>Tạo hồ sơ của bạn</h3>
+              <div class="profile-fields">
+                <div class="profile-field">
+                  <label for="profileNameInput">Tên hồ sơ</label>
+                  <input id="profileNameInput" placeholder="Tên của bạn (VD: Minh)" maxlength="24" required autocomplete="nickname" />
+                </div>
+                <div class="profile-field profile-field--key">
+                  <label for="profileApiKeyInput">Gemini API Key</label>
+                  <input id="profileApiKeyInput" type="password" placeholder="Dán Gemini API Key (AIza...)" required autocomplete="off" />
+                </div>
+                <div class="profile-field">
+                  <label for="profilePinInput">PIN xóa hồ sơ <span>Không bắt buộc</span></label>
+                  <input id="profilePinInput" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="PIN 4 số (để xóa)" autocomplete="off" />
+                  <p class="profile-field-help">Nếu đặt PIN, bạn sẽ cần nhập lại khi xóa. Quyền chủ sở hữu gắn với phiên trình duyệt này (xóa cookie hoặc đổi trình duyệt sẽ mất quyền quản lý; PIN không thay thế danh tính chủ sở hữu).</p>
+                </div>
+              </div>
+              <p id="profileFormError" class="profile-inline-error" role="alert" hidden></p>
+              <div class="profile-actions">
+                <button id="btnSaveProfile" class="profile-action profile-action--primary" type="submit">Lưu &amp; Dùng</button>
+                <button id="btnCancelProfile" class="profile-action" type="button">Hủy</button>
+              </div>
+            </form>
+            <form id="profileDeleteConfirm" class="profile-delete-confirm" hidden novalidate>
+              <div class="profile-delete-heading">
+                <h3>Xóa hồ sơ này?</h3>
+                <p id="profileDeleteTargetName"></p>
+              </div>
+              <div id="profileDeletePinGroup" class="profile-field profile-delete-pin">
+                <label for="profileDeletePinInput">PIN của hồ sơ</label>
+                <input id="profileDeletePinInput" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="Nhập PIN 4 số" autocomplete="off" />
+              </div>
+              <p id="profileDeleteError" class="profile-inline-error" role="alert" hidden></p>
+              <div class="profile-actions">
+                <button id="btnConfirmDeleteProfile" class="profile-action profile-action--primary" type="submit">Xóa</button>
+                <button id="btnCancelDeleteProfile" class="profile-action" type="button">Hủy</button>
+              </div>
+            </form>
+          </section>
+
           <div class="speed-row">
             <label for="speedSlider">Giọng đọc</label>
             <output id="speedValueLabel" for="speedSlider">1.20×</output>

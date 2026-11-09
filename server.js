@@ -9,6 +9,12 @@ import {
   STRICT_TRANSLATOR_PROMPT,
   cleanVietnameseFillers,
 } from './filler-filter.js';
+import {
+  createProfileStore,
+  getExistingOwnerSession,
+  getOrCreateOwnerSession,
+  sanitizeSecretFromText,
+} from './profile-store.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,31 +35,11 @@ function maskKey(key) {
 
 export function createTranslatorServer(options = {}) {
   const apiKey = options.apiKey ?? process.env.GEMINI_API_KEY ?? '';
-  const app = express();
-  app.use(express.json());
-  app.use(express.static(path.join(__dirname, 'public')));
-
-  app.get('/', (_req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-  });
-
-  app.get('/api/config', (_req, res) => {
-    res.json({
-      hasConfiguredKey: Boolean(apiKey),
-      maskedKey: maskKey(apiKey),
-      defaultModel: DEFAULT_MODEL,
-      supportedModels: SUPPORTED_MODELS,
-      systemPromptPreview: STRICT_TRANSLATOR_PROMPT,
-    });
-  });
-
-  app.post('/api/ephemeral-token', async (req, res) => {
-    const activeKey = req.body?.apiKey || apiKey;
-    const model = req.body?.model || DEFAULT_MODEL;
-    if (!activeKey) {
-      return res.status(400).json({ error: 'Thiếu GEMINI_API_KEY trong .env' });
-    }
-    try {
+  const profileStore =
+    options.profileStore || createProfileStore(options.profileStoreOptions || {});
+  const createEphemeralTokenFn =
+    options.createEphemeralTokenFn ||
+    (async ({ activeKey }) => {
       const client = new GoogleGenAI({
         apiKey: activeKey,
         vertexai: false,
@@ -64,14 +50,158 @@ export function createTranslatorServer(options = {}) {
           uses: 10,
         },
       });
-      return res.json({
-        token: token?.name || null,
+      return token?.name || null;
+    });
+
+  const app = express();
+  app.use(express.json());
+  app.use(express.static(path.join(__dirname, 'public')));
+
+  app.get('/', (_req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  });
+
+  app.get('/api/config', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    getOrCreateOwnerSession(req, res, profileStore.sessionSecret);
+    res.json({
+      hasConfiguredKey: Boolean(apiKey),
+      maskedKey: maskKey(apiKey),
+      defaultModel: DEFAULT_MODEL,
+      supportedModels: SUPPORTED_MODELS,
+      systemPromptPreview: STRICT_TRANSLATOR_PROMPT,
+    });
+  });
+
+  app.get('/api/profiles', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    const session = getOrCreateOwnerSession(req, res, profileStore.sessionSecret);
+    try {
+      const profiles = await profileStore.listProfiles(session.ownerProofHash);
+      return res.status(200).json({ profiles });
+    } catch (err) {
+      return res.status(Number(err?.status) || 500).json({
+        error: err?.message || 'Không thể tải danh sách hồ sơ.',
+      });
+    }
+  });
+
+  app.post('/api/profiles', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    const session = getOrCreateOwnerSession(req, res, profileStore.sessionSecret);
+    try {
+      if (req.body?.action === 'delete') {
+        const deleted = await profileStore.deleteProfile({
+          profileId: req.body?.profileId || req.body?.id,
+          pin: req.body?.pin,
+          ownerProofHash: session.ownerProofHash,
+        });
+        return res.status(200).json(deleted);
+      }
+
+      const created = await profileStore.createProfile({
+        name: req.body?.name,
+        apiKey: req.body?.apiKey,
+        pin: req.body?.pin,
+        ownerProofHash: session.ownerProofHash,
+      });
+      return res.status(201).json(created);
+    } catch (err) {
+      const status = Number(err?.status) || 500;
+      if (err?.body && typeof err.body === 'object') {
+        return res.status(status).json(err.body);
+      }
+      return res.status(status).json({
+        error: sanitizeSecretFromText(
+          err?.message || 'Không thể lưu hồ sơ.',
+          req.body?.apiKey
+        ),
+      });
+    }
+  });
+
+  const handleDeleteProfile = async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    const session = getOrCreateOwnerSession(req, res, profileStore.sessionSecret);
+    const profileId =
+      req.params?.id ||
+      req.body?.profileId ||
+      req.body?.id ||
+      req.query?.profileId ||
+      req.query?.id ||
+      '';
+    const pin = req.body?.pin ?? req.query?.pin ?? '';
+    try {
+      const result = await profileStore.deleteProfile({
+        profileId,
+        pin,
+        ownerProofHash: session.ownerProofHash,
+      });
+      return res.status(200).json(result);
+    } catch (err) {
+      const status = Number(err?.status) || 500;
+      if (err?.body && typeof err.body === 'object') {
+        return res.status(status).json(err.body);
+      }
+      return res.status(status).json({
+        error: err?.message || 'Không thể xóa hồ sơ.',
+      });
+    }
+  };
+
+  app.delete('/api/profiles', handleDeleteProfile);
+  app.delete('/api/profiles/:id', handleDeleteProfile);
+
+  app.post('/api/ephemeral-token', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    const session = getOrCreateOwnerSession(req, res, profileStore.sessionSecret);
+    const profileId = req.body?.profileId || 'default';
+    const model = req.body?.model || DEFAULT_MODEL;
+
+    let resolved;
+    try {
+      resolved = await profileStore.resolveProfileApiKey({
+        profileId,
+        ownerProofHash: session.ownerProofHash,
+        defaultServerApiKey: apiKey,
+      });
+    } catch (err) {
+      const status = Number(err?.status) || 400;
+      return res.status(status).json({
+        error: err?.message || 'Không thể dùng hồ sơ đã chọn.',
+        profileId,
+        profileError: true,
+      });
+    }
+
+    try {
+      const tokenName = await createEphemeralTokenFn({
+        activeKey: resolved.apiKey,
         model,
+        profileId: resolved.profileId,
+      });
+      return res.json({
+        token: tokenName,
+        model,
+        profileId: resolved.profileId,
+        profileName: resolved.profileName,
         systemInstruction: STRICT_TRANSLATOR_PROMPT,
       });
     } catch (err) {
+      const cleanMsg = sanitizeSecretFromText(
+        err?.message || 'Chuyển sang kết nối qua Backend Bridge.',
+        resolved.apiKey
+      );
+      if (resolved.isCustomProfile) {
+        return res.status(502).json({
+          error: `Khóa API của hồ sơ "${resolved.profileName}" không hợp lệ hoặc đã hết hạn mức (${cleanMsg}).`,
+          profileId: resolved.profileId,
+          profileName: resolved.profileName,
+          profileError: true,
+        });
+      }
       return res.status(502).json({
-        error: err?.message || 'Chuyển sang kết nối qua Backend Bridge.',
+        error: cleanMsg,
         fallbackBridge: true,
       });
     }
@@ -80,11 +210,12 @@ export function createTranslatorServer(options = {}) {
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws/live' });
 
-  wss.on('connection', (ws) => {
+  wss.on('connection', (ws, req) => {
     let geminiSession = null;
     let filterFillersEnabled = true;
     let pendingQueue = [];
     let isSessionReady = false;
+    const wsOwnerSession = getExistingOwnerSession(req, profileStore.sessionSecret);
 
     const sendToClient = (payload) => {
       if (ws.readyState === ws.OPEN) {
@@ -101,16 +232,23 @@ export function createTranslatorServer(options = {}) {
       }
 
       if (msg.type === 'start') {
-        const activeKey = msg.apiKey || apiKey;
+        const profileId = msg.profileId || 'default';
         const model = msg.model || DEFAULT_MODEL;
         filterFillersEnabled = msg.filterFillers !== false;
         isSessionReady = false;
         pendingQueue = [];
 
-        if (!activeKey) {
+        let resolved;
+        try {
+          resolved = await profileStore.resolveProfileApiKey({
+            profileId,
+            ownerProofHash: wsOwnerSession?.ownerProofHash || '',
+            defaultServerApiKey: apiKey,
+          });
+        } catch (err) {
           sendToClient({
             type: 'error',
-            message: 'Thiếu GEMINI_API_KEY trong .env',
+            message: err?.message || 'Không thể dùng hồ sơ API đã chọn.',
           });
           return;
         }
@@ -125,7 +263,7 @@ export function createTranslatorServer(options = {}) {
 
           // Bắt buộc chỉ định apiVersion: 'v1beta' để tránh lỗi 404 trên Live WebSocket endpoint
           const ai = new GoogleGenAI({
-            apiKey: activeKey,
+            apiKey: resolved.apiKey,
             vertexai: false,
             httpOptions: { apiVersion: 'v1beta' },
           });
@@ -166,6 +304,8 @@ export function createTranslatorServer(options = {}) {
                     type: 'status',
                     status: 'connected',
                     model,
+                    profileId: resolved.profileId,
+                    profileName: resolved.profileName,
                   });
                 }
 
@@ -234,7 +374,10 @@ export function createTranslatorServer(options = {}) {
               onerror: (err) => {
                 sendToClient({
                   type: 'error',
-                  message: err?.message || 'Lỗi kết nối Gemini Live API',
+                  message: sanitizeSecretFromText(
+                    err?.message || 'Lỗi kết nối Gemini Live API',
+                    resolved.apiKey
+                  ),
                 });
               },
               onclose: (evt) => {
@@ -254,6 +397,8 @@ export function createTranslatorServer(options = {}) {
               type: 'status',
               status: 'connected',
               model,
+              profileId: resolved.profileId,
+              profileName: resolved.profileName,
             });
           }
 
@@ -262,9 +407,15 @@ export function createTranslatorServer(options = {}) {
           }
           pendingQueue = [];
         } catch (err) {
+          const cleanErr = sanitizeSecretFromText(
+            String(err?.message || err),
+            resolved.apiKey
+          );
           sendToClient({
             type: 'error',
-            message: `Lỗi kết nối: ${err?.message || err}`,
+            message: resolved.isCustomProfile
+              ? `Khóa API của hồ sơ "${resolved.profileName}" không hợp lệ hoặc đã hết hạn mức: ${cleanErr}`
+              : `Lỗi kết nối: ${cleanErr}`,
           });
         }
         return;
@@ -347,7 +498,7 @@ export function createTranslatorServer(options = {}) {
     });
   });
 
-  return { app, server, wss };
+  return { app, server, wss, profileStore };
 }
 
 const defaultInstance = createTranslatorServer();
