@@ -55,8 +55,16 @@ const profileDeletePinInput = document.getElementById('profileDeletePinInput');
 const profileDeleteError = document.getElementById('profileDeleteError');
 const btnConfirmDeleteProfile = document.getElementById('btnConfirmDeleteProfile');
 const btnCancelDeleteProfile = document.getElementById('btnCancelDeleteProfile');
+const profileUnlockConfirm = document.getElementById('profileUnlockConfirm');
+const profileUnlockName = document.getElementById('profileUnlockName');
+const profileUnlockPinInput = document.getElementById('profileUnlockPinInput');
+const profileUnlockError = document.getElementById('profileUnlockError');
+const btnConfirmUnlockProfile = document.getElementById('btnConfirmUnlockProfile');
+const btnCancelUnlockProfile = document.getElementById('btnCancelUnlockProfile');
 
 const SELECTED_PROFILE_STORAGE_KEY = 'glt_selected_profile_id';
+const UNLOCKED_PROFILES_STORAGE_KEY = 'glt_unlocked_profile_ids';
+const PIN_VALIDATION_REGEX = /^[0-9]{4,8}$/;
 const RESERVED_DEFAULT_NAMES = new Set(['tôi', 'tuấn anh', 'tuan anh']);
 const DEFAULT_PROFILE_ENTRY = {
   id: 'default',
@@ -65,7 +73,9 @@ const DEFAULT_PROFILE_ENTRY = {
   isOwner: true,
   selectable: true,
   ownerNote: null,
-  hasPin: false,
+  hasPin: true,
+  requiresPin: true,
+  isUnlocked: false,
   voiceGender: 'male',
   voiceName: 'Puck',
   voiceLabel: 'Nam',
@@ -75,8 +85,11 @@ const DEFAULT_PROFILE_ENTRY = {
 let profilesList = [{ ...DEFAULT_PROFILE_ENTRY }];
 let activeProfileId = 'default';
 let pendingDeleteProfileId = null;
+let pendingUnlockProfileId = null;
+let pendingUnlockCallback = null;
 let isSavingProfile = false;
 let isDeletingProfile = false;
+let isUnlockingProfile = false;
 let selectedFormVoiceGender = 'male';
 
 let liveClientSession = null;
@@ -145,6 +158,46 @@ function saveSelectedProfileId(profileId) {
   try {
     localStorage.setItem(SELECTED_PROFILE_STORAGE_KEY, profileId);
   } catch {}
+}
+
+function getDeviceUnlockedIds() {
+  try {
+    const raw = localStorage.getItem(UNLOCKED_PROFILES_STORAGE_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDeviceUnlockedId(profileId) {
+  if (!profileId) return;
+  try {
+    const set = getDeviceUnlockedIds();
+    set.add(profileId);
+    localStorage.setItem(UNLOCKED_PROFILES_STORAGE_KEY, JSON.stringify([...set]));
+  } catch {}
+}
+
+function syncDeviceUnlockedIdsFromServer(profiles = []) {
+  try {
+    const set = new Set();
+    for (const p of profiles) {
+      if (p?.id && p?.isUnlocked) {
+        set.add(p.id);
+      }
+    }
+    localStorage.setItem(UNLOCKED_PROFILES_STORAGE_KEY, JSON.stringify([...set]));
+  } catch {}
+}
+
+function doesProfileNeedPinUnlock(profile) {
+  if (!profile) return false;
+  if (profile.id === 'default') {
+    return !profile.isUnlocked;
+  }
+  return Boolean(profile.hasPin && !profile.isUnlocked);
 }
 
 function getActiveProfile() {
@@ -255,7 +308,11 @@ function renderProfileBar() {
   updateProfileCountBadge();
 
   const controlsLocked =
-    isRecording || isStarting || isSavingProfile || isDeletingProfile;
+    isRecording ||
+    isStarting ||
+    isSavingProfile ||
+    isDeletingProfile ||
+    isUnlockingProfile;
 
   const visibleProfiles = getFilteredAndSortedProfiles();
 
@@ -342,8 +399,9 @@ function renderProfileBar() {
     }
   }
 
-  if ( btnAddProfile) {
-    btnAddProfile.disabled = isSavingProfile || isDeletingProfile;
+  if (btnAddProfile) {
+    btnAddProfile.disabled =
+      isSavingProfile || isDeletingProfile || isUnlockingProfile;
   }
 }
 
@@ -371,10 +429,63 @@ function closeAddDrawer(restoreFocus = false) {
 
 function openAddDrawer() {
   closeDeleteConfirm(false);
+  closeUnlockConfirm(false);
   profileFormDrawer.hidden = false;
   btnAddProfile?.setAttribute('aria-expanded', 'true');
   setFormError(profileFormError, '');
   profileNameInput.focus();
+}
+
+function closeUnlockConfirm(restoreFocus = false) {
+  if (!profileUnlockConfirm) return;
+  const prevTargetId = pendingUnlockProfileId;
+  pendingUnlockProfileId = null;
+  pendingUnlockCallback = null;
+  profileUnlockConfirm.hidden = true;
+  if (profileUnlockPinInput) {
+    profileUnlockPinInput.value = '';
+  }
+  setFormError(profileUnlockError, '');
+  renderProfileBar();
+  if (restoreFocus) {
+    const btn =
+      prevTargetId &&
+      profileBar?.querySelector(
+        `.profile-select[data-profile-id="${CSS.escape(prevTargetId)}"]`
+      );
+    if (btn && !btn.disabled) {
+      btn.focus();
+    } else {
+      btnAddProfile?.focus();
+    }
+  }
+}
+
+function openUnlockConfirm(profileId, options = {}) {
+  if (!profileUnlockConfirm) return;
+  if (isRecording || isStarting) {
+    showFeedback('Hãy dừng mic trước khi đổi hoặc mở khóa hồ sơ API.');
+    return;
+  }
+  const target =
+    profilesList.find((p) => p.id === profileId) || DEFAULT_PROFILE_ENTRY;
+
+  closeAddDrawer(false);
+  closeDeleteConfirm(false);
+  pendingUnlockProfileId = target.id;
+  pendingUnlockCallback =
+    typeof options.onUnlocked === 'function' ? options.onUnlocked : null;
+
+  if (profileUnlockName) {
+    profileUnlockName.textContent = target.name;
+  }
+  if (profileUnlockPinInput) {
+    profileUnlockPinInput.value = '';
+  }
+  setFormError(profileUnlockError, '');
+  profileUnlockConfirm.hidden = false;
+  renderProfileBar();
+  profileUnlockPinInput?.focus();
 }
 
 function closeDeleteConfirm(restoreFocus = false) {
@@ -411,6 +522,7 @@ function openDeleteConfirm(profileId) {
   }
 
   closeAddDrawer(false);
+  closeUnlockConfirm(false);
   pendingDeleteProfileId = target.id;
   if (profileDeleteName) {
     profileDeleteName.textContent = target.name;
@@ -437,19 +549,10 @@ function openDeleteConfirm(profileId) {
   }
 }
 
-function handleSelectProfile(profileId) {
-  if (isRecording || isStarting) {
-    showFeedback('Hãy dừng mic trước khi đổi hồ sơ API.');
-    return;
-  }
-  const target = profilesList.find((p) => p.id === profileId);
-  if (!target || (!target.locked && !target.isOwner)) {
-    showFeedback('Hồ sơ này chỉ dành cho chủ hồ sơ.');
-    return;
-  }
-
+function applySelectedProfile(target) {
   closeAddDrawer(false);
   closeDeleteConfirm(false);
+  closeUnlockConfirm(false);
 
   const changed = activeProfileId !== target.id;
   activeProfileId = target.id;
@@ -470,6 +573,29 @@ function handleSelectProfile(profileId) {
   );
 }
 
+function handleSelectProfile(profileId) {
+  if (isRecording || isStarting) {
+    showFeedback('Hãy dừng mic trước khi đổi hồ sơ API.');
+    return;
+  }
+  const target = profilesList.find((p) => p.id === profileId);
+  if (!target || (!target.locked && !target.isOwner)) {
+    showFeedback('Hồ sơ này chỉ dành cho chủ hồ sơ.');
+    return;
+  }
+
+  if (doesProfileNeedPinUnlock(target)) {
+    openUnlockConfirm(target.id, {
+      onUnlocked: (unlockedTarget) => {
+        applySelectedProfile(unlockedTarget || target);
+      },
+    });
+    return;
+  }
+
+  applySelectedProfile(target);
+}
+
 async function loadProfiles(preferredId = null) {
   try {
     const res = await fetch('/api/profiles', {
@@ -481,6 +607,7 @@ async function loadProfiles(preferredId = null) {
     const data = await res.json();
     if (Array.isArray(data?.profiles) && data.profiles.length > 0) {
       profilesList = data.profiles;
+      syncDeviceUnlockedIdsFromServer(profilesList);
     } else {
       profilesList = [{ ...DEFAULT_PROFILE_ENTRY }];
     }
@@ -511,6 +638,116 @@ btnCancelProfile?.addEventListener('click', () => {
 
 btnCancelDeleteProfile?.addEventListener('click', () => {
   closeDeleteConfirm(true);
+});
+
+btnCancelUnlockProfile?.addEventListener('click', () => {
+  closeUnlockConfirm(true);
+});
+
+profileUnlockConfirm?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (isUnlockingProfile || !pendingUnlockProfileId) return;
+  if (isRecording || isStarting) {
+    setFormError(
+      profileUnlockError,
+      'Hãy dừng mic trước khi mở khóa hồ sơ API.'
+    );
+    return;
+  }
+
+  const targetId = pendingUnlockProfileId;
+  const target =
+    profilesList.find((p) => p.id === targetId) || DEFAULT_PROFILE_ENTRY;
+  const pin = (profileUnlockPinInput?.value || '').trim();
+
+  if (!PIN_VALIDATION_REGEX.test(pin)) {
+    setFormError(
+      profileUnlockError,
+      'Vui lòng nhập đúng mã PIN (4–8 chữ số).'
+    );
+    profileUnlockPinInput?.focus();
+    return;
+  }
+
+  isUnlockingProfile = true;
+  if (btnConfirmUnlockProfile) {
+    btnConfirmUnlockProfile.disabled = true;
+    btnConfirmUnlockProfile.setAttribute('aria-busy', 'true');
+    btnConfirmUnlockProfile.textContent = 'Đang mở khóa…';
+  }
+  if (btnCancelUnlockProfile) {
+    btnCancelUnlockProfile.disabled = true;
+  }
+  setFormError(profileUnlockError, '');
+  renderProfileBar();
+
+  try {
+    const res = await fetch('/api/profiles', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'unlock',
+        profileId: targetId,
+        pin,
+      }),
+    });
+    if (profileUnlockPinInput) {
+      profileUnlockPinInput.value = '';
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(
+        data.error || `Không thể mở khóa hồ sơ (HTTP ${res.status})`
+      );
+    }
+
+    if (Array.isArray(data.profiles) && data.profiles.length > 0) {
+      profilesList = data.profiles;
+      syncDeviceUnlockedIdsFromServer(profilesList);
+    } else {
+      profilesList = profilesList.map((p) =>
+        p.id === targetId ? { ...p, isUnlocked: true, isOwner: true } : p
+      );
+      saveDeviceUnlockedId(targetId);
+    }
+
+    const unlockedTarget =
+      profilesList.find((p) => p.id === targetId) || {
+        ...target,
+        isUnlocked: true,
+      };
+    const nextCallback = pendingUnlockCallback;
+
+    applySelectedProfile(unlockedTarget);
+    const activeBtn = profileBar?.querySelector(
+      `.profile-select[data-profile-id="${CSS.escape(targetId)}"]`
+    );
+    activeBtn?.focus();
+    showFeedback(
+      `Đã mở khóa hồ sơ "${unlockedTarget.name}" và lưu trên thiết bị này.`
+    );
+
+    if (typeof nextCallback === 'function') {
+      nextCallback(unlockedTarget);
+    }
+  } catch (err) {
+    const msg = err?.message || 'Mã PIN không đúng.';
+    setFormError(profileUnlockError, msg);
+    showFeedback(msg);
+    profileUnlockPinInput?.focus();
+  } finally {
+    isUnlockingProfile = false;
+    if (btnConfirmUnlockProfile) {
+      btnConfirmUnlockProfile.disabled = false;
+      btnConfirmUnlockProfile.setAttribute('aria-busy', 'false');
+      btnConfirmUnlockProfile.textContent = 'Mở khóa & Lưu thiết bị';
+    }
+    if (btnCancelUnlockProfile) {
+      btnCancelUnlockProfile.disabled = false;
+    }
+    renderProfileBar();
+  }
 });
 
 profileFormDrawer?.addEventListener('submit', async (e) => {
@@ -546,10 +783,10 @@ profileFormDrawer?.addEventListener('submit', async (e) => {
     profileApiKeyInput.focus();
     return;
   }
-  if (pin !== '' && !/^[0-9]{4}$/.test(pin)) {
+  if (pin !== '' && !PIN_VALIDATION_REGEX.test(pin)) {
     setFormError(
       profileFormError,
-      'PIN xóa hồ sơ phải gồm đúng 4 chữ số (0–9).'
+      'Mã PIN hồ sơ phải gồm từ 4 đến 8 chữ số (0–9).'
     );
     profilePinInput.focus();
     return;
@@ -577,8 +814,10 @@ profileFormDrawer?.addEventListener('submit', async (e) => {
 
     if (Array.isArray(data.profiles) && data.profiles.length > 0) {
       profilesList = data.profiles;
+      syncDeviceUnlockedIdsFromServer(profilesList);
     }
     const createdId = data.profile?.id || 'default';
+    saveDeviceUnlockedId(createdId);
     activeProfileId = createdId;
     saveSelectedProfileId(activeProfileId);
     if (profileSearchInput && profileSearchInput.value) {
@@ -629,10 +868,10 @@ profileDeleteConfirm?.addEventListener('submit', async (e) => {
   const target = profilesList.find((p) => p.id === targetId);
   const pin = profileDeletePinInput.value.trim();
 
-  if (target?.hasPin && !/^[0-9]{4}$/.test(pin)) {
+  if (target?.hasPin && !PIN_VALIDATION_REGEX.test(pin)) {
     setFormError(
       profileDeleteError,
-      'Vui lòng nhập đúng mã PIN 4 chữ số của hồ sơ.'
+      'Vui lòng nhập đúng mã PIN (4–8 chữ số) của hồ sơ.'
     );
     profileDeletePinInput.focus();
     return;
@@ -1574,12 +1813,20 @@ async function connectDirectGeminiLive() {
   const res = await fetch('/api/ephemeral-token', {
     method: 'POST',
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, profileId }),
+    headers: {
+      'Content-Type': 'application/json',
+      'X-GLT-Client': 'web',
+    },
+    body: JSON.stringify({ model, profileId, requireUnlock: true }),
   });
 
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}));
+    if (errData.requiresUnlock) {
+      const target = profilesList.find((p) => p.id === profileId);
+      if (target) target.isUnlocked = false;
+      openUnlockConfirm(profileId);
+    }
     throw new Error(errData.error || `HTTP ${res.status}`);
   }
 
@@ -1677,9 +1924,23 @@ async function connectDirectGeminiLive() {
 
 async function startLiveSession() {
   if (isStarting || isRecording) return;
+  const activeProfile = getActiveProfile();
+  if (doesProfileNeedPinUnlock(activeProfile)) {
+    openUnlockConfirm(activeProfile.id, {
+      onUnlocked: () => {
+        startLiveSession();
+      },
+    });
+    showFeedback(
+      `Vui lòng nhập mã PIN để mở khóa hồ sơ "${activeProfile.name}" trên thiết bị này.`
+    );
+    return;
+  }
+
   isStarting = true;
   closeAddDrawer(false);
   closeDeleteConfirm(false);
+  closeUnlockConfirm(false);
   renderProfileBar();
   btnToggleMic.disabled = true;
   btnToggleMic.setAttribute('aria-busy', 'true');
@@ -1920,6 +2181,20 @@ quickTextForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const raw = quickTextInput.value.trim();
   if (!raw) return;
+
+  const activeProfile = getActiveProfile();
+  if (doesProfileNeedPinUnlock(activeProfile)) {
+    openUnlockConfirm(activeProfile.id, {
+      onUnlocked: () => {
+        quickTextForm.requestSubmit();
+      },
+    });
+    showFeedback(
+      `Vui lòng nhập mã PIN để mở khóa hồ sơ "${activeProfile.name}" trên thiết bị này.`
+    );
+    return;
+  }
+
   quickTextInput.value = '';
 
   const cleaned = cleanClientFillers(raw, chkFilterFillers.checked);

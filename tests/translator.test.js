@@ -217,9 +217,79 @@ test('4. Quản lý Hồ sơ API ("Tuấn Anh" mặc định, chọn giọng Nam
     assert.equal(dataA1.profiles[0].id, 'default');
     assert.equal(dataA1.profiles[0].name, 'Tuấn Anh');
     assert.equal(dataA1.profiles[0].locked, true);
+    assert.equal(dataA1.profiles[0].hasPin, true);
+    assert.equal(dataA1.profiles[0].isUnlocked, false);
     assert.equal(dataA1.profiles[0].voiceGender, 'male');
     assert.equal(dataA1.profiles[0].voiceName, 'Puck');
     assert.equal(dataA1.profiles[0].voiceLabel, 'Nam');
+
+    // Khi thiết bị chưa mở khóa PIN "Tuấn Anh", gọi /api/ephemeral-token từ web bị chặn 403 yêu cầu PIN
+    const lockedDefaultTokRes = await fetch(`${baseUrl}/api/ephemeral-token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GLT-Client': 'web',
+        Cookie: cookieA,
+      },
+      body: JSON.stringify({
+        model: 'gemini-3.8-live',
+        profileId: 'default',
+      }),
+    });
+    assert.equal(lockedDefaultTokRes.status, 403);
+    const lockedDefaultTokBody = await lockedDefaultTokRes.json();
+    assert.equal(lockedDefaultTokBody.requiresUnlock, true);
+
+    // Mở khóa "Tuấn Anh" với PIN sai -> bị chặn 403
+    const unlockWrongRes = await fetch(`${baseUrl}/api/profiles`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: cookieA,
+      },
+      body: JSON.stringify({
+        action: 'unlock',
+        profileId: 'default',
+        pin: '000000',
+      }),
+    });
+    assert.equal(unlockWrongRes.status, 403);
+
+    // Mở khóa "Tuấn Anh" với PIN đúng "512005" -> thành công và lưu cookie trên thiết bị
+    const unlockRightRes = await fetch(`${baseUrl}/api/profiles`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: cookieA,
+      },
+      body: JSON.stringify({
+        action: 'unlock',
+        profileId: 'default',
+        pin: '512005',
+      }),
+    });
+    assert.equal(unlockRightRes.status, 200);
+    const unlockCookie = extractCookieHeader(unlockRightRes);
+    assert.match(unlockCookie, /glt_unlocked_profiles=/);
+    const combinedCookieA = `${cookieA}; ${unlockCookie}`;
+    const unlockRightBody = await unlockRightRes.json();
+    assert.equal(unlockRightBody.unlocked, true);
+    assert.equal(unlockRightBody.profiles[0].isUnlocked, true);
+
+    // Sau khi đã lưu mở khóa trên thiết bị, gọi /api/ephemeral-token cho "Tuấn Anh" thành công ngay
+    const unlockedDefaultTokRes = await fetch(`${baseUrl}/api/ephemeral-token`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-GLT-Client': 'web',
+        Cookie: combinedCookieA,
+      },
+      body: JSON.stringify({
+        model: 'gemini-3.8-live',
+        profileId: 'default',
+      }),
+    });
+    assert.equal(unlockedDefaultTokRes.status, 200);
 
     // Không thể xóa hồ sơ "Tuấn Anh" (default)
     const delDefaultRes = await fetch(`${baseUrl}/api/profiles/default`, {

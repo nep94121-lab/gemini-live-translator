@@ -1,6 +1,8 @@
 import {
   createProfileStore,
   getOrCreateOwnerSession,
+  getUnlockedProfileIds,
+  setUnlockedProfileIdsCookie,
 } from '../../profile-store.js';
 
 let cachedStore = null;
@@ -22,11 +24,39 @@ export default async function handler(req, res) {
   }
 
   const session = getOrCreateOwnerSession(req, res, store.sessionSecret);
+  const unlockedProfileIds = getUnlockedProfileIds(req, store.sessionSecret);
   const profileId =
     req.query?.id ||
     req.body?.profileId ||
     req.body?.id ||
     '';
+
+  if (req.method === 'POST' && req.body?.action === 'unlock') {
+    const pin = req.body?.pin ?? req.query?.pin ?? '';
+    try {
+      const result = await store.unlockProfile({
+        profileId: profileId || 'default',
+        pin,
+        ownerProofHash: session.ownerProofHash,
+        unlockedProfileIds,
+      });
+      setUnlockedProfileIdsCookie(
+        req,
+        res,
+        store.sessionSecret,
+        result.unlockedProfileIds
+      );
+      return res.status(200).json(result);
+    } catch (err) {
+      const status = Number(err?.status) || 500;
+      if (err?.body && typeof err.body === 'object') {
+        return res.status(status).json(err.body);
+      }
+      return res.status(status).json({
+        error: err?.message || 'Không thể mở khóa hồ sơ.',
+      });
+    }
+  }
 
   if (req.method === 'DELETE' || (req.method === 'POST' && req.body?.action === 'delete')) {
     const pin = req.body?.pin ?? req.query?.pin ?? '';
@@ -35,7 +65,14 @@ export default async function handler(req, res) {
         profileId,
         pin,
         ownerProofHash: session.ownerProofHash,
+        unlockedProfileIds,
       });
+      setUnlockedProfileIdsCookie(
+        req,
+        res,
+        store.sessionSecret,
+        result.unlockedProfileIds
+      );
       return res.status(200).json(result);
     } catch (err) {
       const status = Number(err?.status) || 500;

@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const OWNER_COOKIE_NAME = 'glt_owner_session';
+export const UNLOCKED_COOKIE_NAME = 'glt_unlocked_profiles';
 export const DEFAULT_PROFILE_NAME = 'Tuấn Anh';
+export const DEFAULT_PROFILE_PIN = process.env.DEFAULT_PROFILE_PIN || '512005';
+export const PIN_REGEX = /^[0-9]{4,8}$/;
 export const MAX_PIN_ATTEMPTS = 5;
 export const PIN_LOCKOUT_MS = 15 * 60 * 1000;
 
@@ -173,6 +176,83 @@ export function getOrCreateOwnerSession(req, res, sessionSecret) {
   };
   if (req) req._gltOwnerSession = session;
   return session;
+}
+
+function signUnlockedPayload(payloadB64, sessionSecret) {
+  return crypto
+    .createHmac('sha256', sessionSecret)
+    .update(`glt-unlocked-v1:${payloadB64}`)
+    .digest('base64url');
+}
+
+export function getUnlockedProfileIds(req, sessionSecret) {
+  if (!req || !sessionSecret) return new Set();
+  if (req._gltUnlockedSet instanceof Set) return new Set(req._gltUnlockedSet);
+  const cookies = parseCookies(req.headers?.cookie || '');
+  const rawToken = cookies[UNLOCKED_COOKIE_NAME];
+  if (!rawToken || typeof rawToken !== 'string') return new Set();
+  const dotIdx = rawToken.indexOf('.');
+  if (dotIdx <= 0) return new Set();
+  const payloadB64 = rawToken.slice(0, dotIdx);
+  const sig = rawToken.slice(dotIdx + 1);
+  if (!payloadB64 || !sig) return new Set();
+  const expectedSig = signUnlockedPayload(payloadB64, sessionSecret);
+  const bufActual = Buffer.from(sig, 'utf8');
+  const bufExpected = Buffer.from(expectedSig, 'utf8');
+  if (bufActual.length !== bufExpected.length) return new Set();
+  if (!crypto.timingSafeEqual(bufActual, bufExpected)) return new Set();
+  try {
+    const parsed = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+    if (!Array.isArray(parsed)) return new Set();
+    const set = new Set(
+      parsed.filter((item) => typeof item === 'string' && item.length > 0 && item.length <= 64)
+    );
+    req._gltUnlockedSet = set;
+    return new Set(set);
+  } catch {
+    return new Set();
+  }
+}
+
+export function setUnlockedProfileIdsCookie(req, res, sessionSecret, unlockedIds) {
+  if (!res || typeof res.setHeader !== 'function' || !sessionSecret) return;
+  const list = [...new Set(unlockedIds)].slice(-40);
+  const payloadB64 = Buffer.from(JSON.stringify(list), 'utf8').toString('base64url');
+  const sig = signUnlockedPayload(payloadB64, sessionSecret);
+  const signedToken = `${payloadB64}.${sig}`;
+  const isHttps = Boolean(
+    req?.secure ||
+      String(req?.headers?.['x-forwarded-proto'] || '').includes('https') ||
+      process.env.VERCEL === '1'
+  );
+  const cookieParts = [
+    `${UNLOCKED_COOKIE_NAME}=${encodeURIComponent(signedToken)}`,
+    'Path=/',
+    'Max-Age=31536000',
+    'HttpOnly',
+    'SameSite=Lax',
+  ];
+  if (isHttps) {
+    cookieParts.push('Secure');
+  }
+  const cookieStr = cookieParts.join('; ');
+  const prev = res.getHeader?.('Set-Cookie');
+  if (!prev) {
+    res.setHeader('Set-Cookie', cookieStr);
+  } else if (Array.isArray(prev)) {
+    const filtered = prev.filter((c) => !String(c).startsWith(`${UNLOCKED_COOKIE_NAME}=`));
+    res.setHeader('Set-Cookie', [...filtered, cookieStr]);
+  } else {
+    const prevStr = String(prev);
+    if (prevStr.startsWith(`${UNLOCKED_COOKIE_NAME}=`)) {
+      res.setHeader('Set-Cookie', cookieStr);
+    } else {
+      res.setHeader('Set-Cookie', [prevStr, cookieStr]);
+    }
+  }
+  if (req) {
+    req._gltUnlockedSet = new Set(list);
+  }
 }
 
 function deriveAesKey(encryptionSecret) {
@@ -433,7 +513,15 @@ export class GitHubRepoStorageAdapter {
   }
 }
 
-export function serializeProfilesForOwner(storedProfiles = [], ownerProofHash = '') {
+export function serializeProfilesForOwner(
+  storedProfiles = [],
+  ownerProofHash = '',
+  unlockedProfileIds = null
+) {
+  const unlockedSet =
+    unlockedProfileIds instanceof Set
+      ? unlockedProfileIds
+      : new Set(Array.isArray(unlockedProfileIds) ? unlockedProfileIds : []);
   const defaultVoice = getVoiceMetadata('male');
   const list = [
     {
@@ -443,7 +531,9 @@ export function serializeProfilesForOwner(storedProfiles = [], ownerProofHash = 
       isOwner: true,
       selectable: true,
       ownerNote: null,
-      hasPin: false,
+      hasPin: true,
+      requiresPin: true,
+      isUnlocked: unlockedSet.has('default'),
       voiceGender: defaultVoice.voiceGender,
       voiceName: defaultVoice.voiceName,
       voiceLabel: defaultVoice.voiceLabel,
@@ -452,9 +542,13 @@ export function serializeProfilesForOwner(storedProfiles = [], ownerProofHash = 
   ];
   for (const p of storedProfiles) {
     if (!p || typeof p.id !== 'string' || typeof p.name !== 'string') continue;
-    const isOwner = Boolean(
+    const isCreator = Boolean(
       ownerProofHash && isTimingSafeHexEqual(p.ownerProofHash, ownerProofHash)
     );
+    const hasPin = Boolean(p.hasPin);
+    const isUnlockedByPin = hasPin && unlockedSet.has(p.id);
+    const isOwner = isCreator || isUnlockedByPin;
+    const isUnlocked = hasPin ? unlockedSet.has(p.id) || isCreator : isCreator;
     const voiceMeta = getVoiceMetadata(p.voiceGender);
     list.push({
       id: p.id,
@@ -463,7 +557,9 @@ export function serializeProfilesForOwner(storedProfiles = [], ownerProofHash = 
       isOwner,
       selectable: isOwner,
       ownerNote: isOwner ? null : 'Chỉ chủ hồ sơ',
-      hasPin: Boolean(p.hasPin),
+      hasPin,
+      requiresPin: hasPin,
+      isUnlocked,
       voiceGender: voiceMeta.voiceGender,
       voiceName: voiceMeta.voiceName,
       voiceLabel: voiceMeta.voiceLabel,
@@ -511,17 +607,41 @@ export function createProfileStore(options = {}) {
     );
   }
 
+  const defaultPin = String(
+    options.defaultPin ?? process.env.DEFAULT_PROFILE_PIN ?? DEFAULT_PROFILE_PIN
+  ).trim();
+  const defaultPinSalt = crypto
+    .createHash('sha256')
+    .update(`glt-default-pin-salt:${sessionSecret}`)
+    .digest('hex')
+    .slice(0, 32);
+  const defaultPinHash = hashPin(defaultPin, defaultPinSalt);
+  let defaultFailedAttempts = 0;
+  let defaultLockedUntil = 0;
+
   return {
     sessionSecret,
     encryptionKey,
     adapter,
+    defaultPin,
 
-    async listProfiles(ownerProofHash) {
+    async listProfiles(ownerProofHash, unlockedProfileIds = null) {
       const { state } = await adapter.readState();
-      return serializeProfilesForOwner(state.profiles, ownerProofHash);
+      return serializeProfilesForOwner(
+        state.profiles,
+        ownerProofHash,
+        unlockedProfileIds
+      );
     },
 
-    async createProfile({ name, apiKey, pin, voiceGender, ownerProofHash }) {
+    async createProfile({
+      name,
+      apiKey,
+      pin,
+      voiceGender,
+      ownerProofHash,
+      unlockedProfileIds = null,
+    }) {
       if (!ownerProofHash) {
         const err = new Error('Không xác định được phiên chủ sở hữu.');
         err.status = 401;
@@ -561,8 +681,8 @@ export function createProfileStore(options = {}) {
 
       const cleanPin =
         pin === undefined || pin === null ? '' : String(pin).trim();
-      if (cleanPin !== '' && !/^[0-9]{4}$/.test(cleanPin)) {
-        const err = new Error('PIN xóa hồ sơ phải gồm đúng 4 chữ số (0–9).');
+      if (cleanPin !== '' && !PIN_REGEX.test(cleanPin)) {
+        const err = new Error('Mã PIN hồ sơ phải gồm từ 4 đến 8 chữ số (0–9).');
         err.status = 400;
         throw err;
       }
@@ -594,27 +714,288 @@ export function createProfileStore(options = {}) {
         createdAt,
       };
 
+      const nextUnlocked = new Set(
+        unlockedProfileIds instanceof Set
+          ? unlockedProfileIds
+          : Array.isArray(unlockedProfileIds)
+            ? unlockedProfileIds
+            : []
+      );
+      nextUnlocked.add(profileId);
+
       const outcome = await adapter.mutateState(async (state) => {
         state.profiles.push(newRecord);
-        const profiles = serializeProfilesForOwner(state.profiles, ownerProofHash);
+        const profiles = serializeProfilesForOwner(
+          state.profiles,
+          ownerProofHash,
+          nextUnlocked
+        );
         const created = profiles.find((item) => item.id === profileId);
         return {
           changed: true,
           commitMessage: `create profile ${profileId}`,
-          value: { profile: created, profiles },
+          value: {
+            profile: created,
+            profiles,
+            unlockedProfileIds: [...nextUnlocked],
+          },
         };
       });
 
       return outcome.value;
     },
 
-    async deleteProfile({ profileId, pin, ownerProofHash }) {
+    async unlockProfile({
+      profileId,
+      pin,
+      ownerProofHash,
+      unlockedProfileIds = null,
+    }) {
+      const targetId =
+        typeof profileId === 'string' && profileId.trim()
+          ? profileId.trim()
+          : 'default';
+      const cleanPin =
+        pin === undefined || pin === null ? '' : String(pin).trim();
+      const nextUnlocked = new Set(
+        unlockedProfileIds instanceof Set
+          ? unlockedProfileIds
+          : Array.isArray(unlockedProfileIds)
+            ? unlockedProfileIds
+            : []
+      );
+
+      if (targetId === 'default') {
+        const now = Date.now();
+        if (defaultLockedUntil && defaultLockedUntil > now) {
+          const err = new Error(
+            `Đã nhập sai PIN quá số lần cho phép. Tạm khóa mở hồ sơ "${DEFAULT_PROFILE_NAME}", vui lòng thử lại sau.`
+          );
+          err.status = 429;
+          err.body = {
+            error: err.message,
+            locked: true,
+            remainingAttempts: 0,
+          };
+          throw err;
+        }
+        if (defaultLockedUntil && defaultLockedUntil <= now) {
+          defaultFailedAttempts = 0;
+          defaultLockedUntil = 0;
+        }
+
+        if (!PIN_REGEX.test(cleanPin)) {
+          const err = new Error('Vui lòng nhập mã PIN (4–8 chữ số).');
+          err.status = 400;
+          err.body = { error: err.message, requiresPin: true };
+          throw err;
+        }
+
+        const candidateHash = hashPin(cleanPin, defaultPinSalt);
+        if (!isTimingSafeHexEqual(candidateHash, defaultPinHash)) {
+          defaultFailedAttempts += 1;
+          const remaining = Math.max(0, MAX_PIN_ATTEMPTS - defaultFailedAttempts);
+          if (remaining === 0) {
+            defaultLockedUntil = now + PIN_LOCKOUT_MS;
+            const err = new Error(
+              `Đã nhập sai PIN 5 lần. Tạm khóa mở hồ sơ "${DEFAULT_PROFILE_NAME}" trong 15 phút.`
+            );
+            err.status = 429;
+            err.body = {
+              error: err.message,
+              locked: true,
+              remainingAttempts: 0,
+            };
+            throw err;
+          }
+          const err = new Error(`Mã PIN không đúng. Còn ${remaining} lần thử.`);
+          err.status = 403;
+          err.body = {
+            error: err.message,
+            remainingAttempts: remaining,
+          };
+          throw err;
+        }
+
+        defaultFailedAttempts = 0;
+        defaultLockedUntil = 0;
+        nextUnlocked.add('default');
+        const { state } = await adapter.readState();
+        const profiles = serializeProfilesForOwner(
+          state.profiles,
+          ownerProofHash,
+          nextUnlocked
+        );
+        return {
+          unlocked: true,
+          profileId: 'default',
+          profileName: DEFAULT_PROFILE_NAME,
+          profiles,
+          unlockedProfileIds: [...nextUnlocked],
+        };
+      }
+
+      const outcome = await adapter.mutateState(async (state) => {
+        const record = state.profiles.find((p) => p && p.id === targetId);
+        if (!record) {
+          return {
+            changed: false,
+            error: {
+              status: 404,
+              body: { error: 'Hồ sơ không tồn tại hoặc đã bị xóa.' },
+            },
+          };
+        }
+
+        if (!record.hasPin) {
+          const isCreator = Boolean(
+            ownerProofHash &&
+              isTimingSafeHexEqual(record.ownerProofHash, ownerProofHash)
+          );
+          if (!isCreator) {
+            return {
+              changed: false,
+              error: {
+                status: 403,
+                body: {
+                  error: `Hồ sơ "${record.name}" không đặt mã PIN nên chỉ dùng được trên trình duyệt đã tạo.`,
+                },
+              },
+            };
+          }
+          nextUnlocked.add(targetId);
+          return {
+            changed: false,
+            value: {
+              unlocked: true,
+              profileId: targetId,
+              profileName: record.name,
+              profiles: serializeProfilesForOwner(
+                state.profiles,
+                ownerProofHash,
+                nextUnlocked
+              ),
+              unlockedProfileIds: [...nextUnlocked],
+            },
+          };
+        }
+
+        const now = Date.now();
+        if (record.pinLockedUntil && record.pinLockedUntil > now) {
+          return {
+            changed: false,
+            error: {
+              status: 429,
+              body: {
+                error:
+                  'Đã nhập sai PIN quá số lần cho phép. Tạm khóa hồ sơ này, vui lòng thử lại sau.',
+                locked: true,
+                remainingAttempts: 0,
+              },
+            },
+          };
+        }
+        if (record.pinLockedUntil && record.pinLockedUntil <= now) {
+          record.failedPinAttempts = 0;
+          record.pinLockedUntil = 0;
+        }
+
+        if (!PIN_REGEX.test(cleanPin)) {
+          return {
+            changed: false,
+            error: {
+              status: 400,
+              body: {
+                error: 'Vui lòng nhập mã PIN của hồ sơ (4–8 chữ số).',
+                requiresPin: true,
+              },
+            },
+          };
+        }
+
+        const candidateHash = hashPin(cleanPin, record.pinSalt);
+        if (!isTimingSafeHexEqual(candidateHash, record.pinHash)) {
+          record.failedPinAttempts = Number(record.failedPinAttempts || 0) + 1;
+          const remaining = Math.max(0, MAX_PIN_ATTEMPTS - record.failedPinAttempts);
+          if (remaining === 0) {
+            record.pinLockedUntil = now + PIN_LOCKOUT_MS;
+            return {
+              changed: true,
+              commitMessage: `lockout pin for ${targetId}`,
+              error: {
+                status: 429,
+                body: {
+                  error:
+                    'Đã nhập sai PIN 5 lần. Tạm khóa hồ sơ này trong 15 phút.',
+                  locked: true,
+                  remainingAttempts: 0,
+                },
+              },
+            };
+          }
+          return {
+            changed: true,
+            commitMessage: `failed pin attempt for ${targetId}`,
+            error: {
+              status: 403,
+              body: {
+                error: `Mã PIN không đúng. Còn ${remaining} lần thử.`,
+                remainingAttempts: remaining,
+              },
+            },
+          };
+        }
+
+        const hadFailures = Number(record.failedPinAttempts || 0) > 0;
+        record.failedPinAttempts = 0;
+        record.pinLockedUntil = 0;
+        nextUnlocked.add(targetId);
+        return {
+          changed: hadFailures,
+          commitMessage: `reset pin attempts for ${targetId}`,
+          value: {
+            unlocked: true,
+            profileId: targetId,
+            profileName: record.name,
+            profiles: serializeProfilesForOwner(
+              state.profiles,
+              ownerProofHash,
+              nextUnlocked
+            ),
+            unlockedProfileIds: [...nextUnlocked],
+          },
+        };
+      });
+
+      if (outcome?.error) {
+        const err = new Error(outcome.error.body.error);
+        err.status = outcome.error.status;
+        err.body = outcome.error.body;
+        throw err;
+      }
+      return outcome.value;
+    },
+
+    async deleteProfile({
+      profileId,
+      pin,
+      ownerProofHash,
+      unlockedProfileIds = null,
+    }) {
       const targetId = typeof profileId === 'string' ? profileId.trim() : '';
       if (!targetId || targetId === 'default') {
         const err = new Error(`Không thể xóa hồ sơ mặc định "${DEFAULT_PROFILE_NAME}".`);
         err.status = 403;
         throw err;
       }
+
+      const nextUnlocked = new Set(
+        unlockedProfileIds instanceof Set
+          ? unlockedProfileIds
+          : Array.isArray(unlockedProfileIds)
+            ? unlockedProfileIds
+            : []
+      );
 
       const outcome = await adapter.mutateState(async (state) => {
         const idx = state.profiles.findIndex((p) => p && p.id === targetId);
@@ -667,13 +1048,13 @@ export function createProfileStore(options = {}) {
 
           const cleanPin =
             pin === undefined || pin === null ? '' : String(pin).trim();
-          if (!/^[0-9]{4}$/.test(cleanPin)) {
+          if (!PIN_REGEX.test(cleanPin)) {
             return {
               changed: false,
               error: {
                 status: 400,
                 body: {
-                  error: 'Vui lòng nhập đúng mã PIN 4 chữ số của hồ sơ.',
+                  error: 'Vui lòng nhập đúng mã PIN của hồ sơ (4–8 chữ số).',
                   requiresPin: true,
                 },
               },
@@ -715,12 +1096,18 @@ export function createProfileStore(options = {}) {
         }
 
         state.profiles.splice(idx, 1);
+        nextUnlocked.delete(targetId);
         return {
           changed: true,
           commitMessage: `delete profile ${targetId}`,
           value: {
             deletedId: targetId,
-            profiles: serializeProfilesForOwner(state.profiles, ownerProofHash),
+            profiles: serializeProfilesForOwner(
+              state.profiles,
+              ownerProofHash,
+              nextUnlocked
+            ),
+            unlockedProfileIds: [...nextUnlocked],
           },
         };
       });
@@ -734,13 +1121,45 @@ export function createProfileStore(options = {}) {
       return outcome.value;
     },
 
-    async resolveProfileApiKey({ profileId, ownerProofHash, defaultServerApiKey }) {
+    async resolveProfileApiKey({
+      profileId,
+      ownerProofHash,
+      unlockedProfileIds = null,
+      pin = null,
+      requireDefaultUnlock = false,
+      defaultServerApiKey,
+    }) {
       const targetId =
         typeof profileId === 'string' && profileId.trim()
           ? profileId.trim()
           : 'default';
+      const unlockedSet =
+        unlockedProfileIds instanceof Set
+          ? unlockedProfileIds
+          : new Set(Array.isArray(unlockedProfileIds) ? unlockedProfileIds : []);
 
       if (targetId === 'default') {
+        if (pin !== null && pin !== undefined && String(pin).trim() !== '') {
+          const candidateHash = hashPin(String(pin).trim(), defaultPinSalt);
+          if (!isTimingSafeHexEqual(candidateHash, defaultPinHash)) {
+            const err = new Error(
+              `Mã PIN của hồ sơ "${DEFAULT_PROFILE_NAME}" không đúng.`
+            );
+            err.status = 403;
+            err.requiresUnlock = true;
+            err.profileError = true;
+            throw err;
+          }
+        } else if (requireDefaultUnlock && !unlockedSet.has('default')) {
+          const err = new Error(
+            `Vui lòng nhập mã PIN để mở khóa hồ sơ "${DEFAULT_PROFILE_NAME}" trên thiết bị này.`
+          );
+          err.status = 403;
+          err.requiresUnlock = true;
+          err.profileError = true;
+          throw err;
+        }
+
         if (!defaultServerApiKey) {
           const err = new Error('Thiếu GEMINI_API_KEY của chủ web trên Server.');
           err.status = 400;
@@ -767,14 +1186,18 @@ export function createProfileStore(options = {}) {
         throw err;
       }
 
-      const isOwner = Boolean(
+      const isCreator = Boolean(
         ownerProofHash && isTimingSafeHexEqual(record.ownerProofHash, ownerProofHash)
       );
-      if (!isOwner) {
+      const isUnlockedByPin = Boolean(record.hasPin && unlockedSet.has(record.id));
+      if (!isCreator && !isUnlockedByPin) {
         const err = new Error(
-          `Hồ sơ "${record.name}" chỉ dành cho chủ hồ sơ. Bạn không có quyền sử dụng khóa này.`
+          record.hasPin
+            ? `Hồ sơ "${record.name}" chỉ dành cho chủ hồ sơ. Vui lòng nhập mã PIN để mở khóa trên thiết bị này.`
+            : `Hồ sơ "${record.name}" chỉ dành cho chủ hồ sơ. Bạn không có quyền sử dụng khóa này.`
         );
         err.status = 403;
+        err.requiresUnlock = Boolean(record.hasPin);
         err.profileError = true;
         throw err;
       }

@@ -1,7 +1,9 @@
 import {
   createProfileStore,
   getOrCreateOwnerSession,
-  sanitizeSecretFromText,
+  getUnlockedProfileIds,
+   sanitizeSecretFromText,
+  setUnlockedProfileIdsCookie,
 } from '../profile-store.js';
 
 let cachedStore = null;
@@ -23,21 +25,48 @@ export default async function handler(req, res) {
   }
 
   const session = getOrCreateOwnerSession(req, res, store.sessionSecret);
+  const unlockedProfileIds = getUnlockedProfileIds(req, store.sessionSecret);
 
   try {
     if (req.method === 'GET') {
-      const profiles = await store.listProfiles(session.ownerProofHash);
+      const profiles = await store.listProfiles(
+        session.ownerProofHash,
+        unlockedProfileIds
+      );
       return res.status(200).json({ profiles });
     }
 
     if (req.method === 'POST') {
       const action = req.body?.action;
+      if (action === 'unlock') {
+        const result = await store.unlockProfile({
+          profileId: req.body?.profileId || req.body?.id || 'default',
+          pin: req.body?.pin,
+          ownerProofHash: session.ownerProofHash,
+          unlockedProfileIds,
+        });
+        setUnlockedProfileIdsCookie(
+          req,
+          res,
+          store.sessionSecret,
+          result.unlockedProfileIds
+        );
+        return res.status(200).json(result);
+      }
+
       if (action === 'delete') {
         const result = await store.deleteProfile({
           profileId: req.body?.profileId || req.body?.id,
           pin: req.body?.pin,
           ownerProofHash: session.ownerProofHash,
+          unlockedProfileIds,
         });
+        setUnlockedProfileIdsCookie(
+          req,
+          res,
+          store.sessionSecret,
+          result.unlockedProfileIds
+        );
         return res.status(200).json(result);
       }
 
@@ -47,7 +76,14 @@ export default async function handler(req, res) {
         pin: req.body?.pin,
         voiceGender: req.body?.voiceGender,
         ownerProofHash: session.ownerProofHash,
+        unlockedProfileIds,
       });
+      setUnlockedProfileIdsCookie(
+        req,
+        res,
+        store.sessionSecret,
+        result.unlockedProfileIds
+      );
       return res.status(201).json(result);
     }
 
@@ -63,7 +99,14 @@ export default async function handler(req, res) {
         profileId,
         pin,
         ownerProofHash: session.ownerProofHash,
+        unlockedProfileIds,
       });
+      setUnlockedProfileIdsCookie(
+        req,
+        res,
+        store.sessionSecret,
+        result.unlockedProfileIds
+      );
       return res.status(200).json(result);
     }
 

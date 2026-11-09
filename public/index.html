@@ -107,16 +107,31 @@
                   <input id="profileApiKeyInput" name="profileApiKey" type="password" placeholder="Dán Gemini API Key (AIza...)" autocomplete="off" autocapitalize="none" spellcheck="false" required />
                 </div>
                 <div class="profile-field profile-field--pin">
-                  <label for="profilePinInput">PIN xóa hồ sơ <span>Không bắt buộc</span></label>
-                  <input id="profilePinInput" name="profilePin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="PIN 4 số (để xóa)" autocomplete="new-password" />
+                  <label for="profilePinInput">Mã PIN bảo vệ &amp; xóa <span>4–8 số · Không bắt buộc</span></label>
+                  <input id="profilePinInput" name="profilePin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" placeholder="PIN 4–8 số (VD: 512005)" autocomplete="new-password" />
                 </div>
-                <p class="profile-cookie-note">Quyền quản lý gắn với phiên của trình duyệt này. Nếu xóa cookie hoặc đổi trình duyệt, bạn có thể mất quyền quản lý hồ sơ.</p>
+                <p class="profile-cookie-note">Quyền quản lý và trạng thái mở khóa PIN được lưu trên thiết bị này. Nếu xóa cookie hoặc đổi thiết bị, hãy nhập lại mã PIN.</p>
               </div>
               <p id="profileFormError" class="profile-error profile-inline-error" role="alert" hidden></p>
               <div class="profile-actions">
                 <button id="btnSaveProfile" class="profile-action profile-action--primary" type="submit">Lưu &amp; Dùng</button>
                 <button id="btnCancelProfile" class="profile-action" type="button">Hủy</button>
               </div>
+            </form>
+            <form id="profileUnlockConfirm" class="profile-unlock-confirm" aria-labelledby="profileUnlockHeading" hidden novalidate>
+              <div class="profile-delete-heading">
+                <h3 id="profileUnlockHeading">Nhập mã PIN để dùng hồ sơ</h3>
+                <p id="profileUnlockTargetName">Hồ sơ: <strong id="profileUnlockName">Tuấn Anh</strong> · Mở khóa 1 lần và tự lưu trên thiết bị này.</p>
+              </div>
+              <div class="profile-field profile-unlock-pin">
+                <label for="profileUnlockPinInput">Mã PIN của hồ sơ (4–8 chữ số)</label>
+                <input id="profileUnlockPinInput" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" placeholder="Nhập mã PIN (4–8 số)" autocomplete="off" required />
+              </div>
+              <div class="profile-actions">
+                <button id="btnConfirmUnlockProfile" class="profile-action profile-action--primary" type="submit">Mở khóa &amp; Lưu thiết bị</button>
+                <button id="btnCancelUnlockProfile" class="profile-action" type="button">Hủy</button>
+              </div>
+              <p id="profileUnlockError" class="profile-error profile-inline-error" role="alert" hidden></p>
             </form>
             <form id="profileDeleteConfirm" class="profile-delete-confirm" aria-labelledby="profileDeleteHeading" hidden novalidate>
               <div class="profile-delete-heading">
@@ -125,7 +140,7 @@
               </div>
               <div id="profileDeletePinGroup" class="profile-field profile-delete-pin">
                 <label for="profileDeletePinInput">PIN của hồ sơ</label>
-                <input id="profileDeletePinInput" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="Nhập PIN 4 số" autocomplete="off" />
+                <input id="profileDeletePinInput" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" placeholder="Nhập PIN (4–8 số)" autocomplete="off" />
               </div>
               <div class="profile-actions">
                 <button id="btnConfirmDeleteProfile" class="profile-action profile-action--primary" type="submit">Xóa</button>

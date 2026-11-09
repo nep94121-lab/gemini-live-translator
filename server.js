@@ -13,7 +13,9 @@ import {
   createProfileStore,
   getExistingOwnerSession,
   getOrCreateOwnerSession,
+  getUnlockedProfileIds,
   sanitizeSecretFromText,
+  setUnlockedProfileIdsCookie,
 } from './profile-store.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -76,8 +78,15 @@ export function createTranslatorServer(options = {}) {
   app.get('/api/profiles', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     const session = getOrCreateOwnerSession(req, res, profileStore.sessionSecret);
+    const unlockedProfileIds = getUnlockedProfileIds(
+      req,
+      profileStore.sessionSecret
+    );
     try {
-      const profiles = await profileStore.listProfiles(session.ownerProofHash);
+      const profiles = await profileStore.listProfiles(
+        session.ownerProofHash,
+        unlockedProfileIds
+      );
       return res.status(200).json({ profiles });
     } catch (err) {
       return res.status(Number(err?.status) || 500).json({
@@ -89,13 +98,40 @@ export function createTranslatorServer(options = {}) {
   app.post('/api/profiles', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     const session = getOrCreateOwnerSession(req, res, profileStore.sessionSecret);
+    const unlockedProfileIds = getUnlockedProfileIds(
+      req,
+      profileStore.sessionSecret
+    );
     try {
+      if (req.body?.action === 'unlock') {
+        const unlocked = await profileStore.unlockProfile({
+          profileId: req.body?.profileId || req.body?.id || 'default',
+          pin: req.body?.pin,
+          ownerProofHash: session.ownerProofHash,
+          unlockedProfileIds,
+        });
+        setUnlockedProfileIdsCookie(
+          req,
+          res,
+          profileStore.sessionSecret,
+          unlocked.unlockedProfileIds
+        );
+        return res.status(200).json(unlocked);
+      }
+
       if (req.body?.action === 'delete') {
         const deleted = await profileStore.deleteProfile({
           profileId: req.body?.profileId || req.body?.id,
           pin: req.body?.pin,
           ownerProofHash: session.ownerProofHash,
+          unlockedProfileIds,
         });
+        setUnlockedProfileIdsCookie(
+          req,
+          res,
+          profileStore.sessionSecret,
+          deleted.unlockedProfileIds
+        );
         return res.status(200).json(deleted);
       }
 
@@ -105,7 +141,14 @@ export function createTranslatorServer(options = {}) {
         pin: req.body?.pin,
         voiceGender: req.body?.voiceGender,
         ownerProofHash: session.ownerProofHash,
+        unlockedProfileIds,
       });
+      setUnlockedProfileIdsCookie(
+        req,
+        res,
+        profileStore.sessionSecret,
+        created.unlockedProfileIds
+      );
       return res.status(201).json(created);
     } catch (err) {
       const status = Number(err?.status) || 500;
@@ -121,9 +164,48 @@ export function createTranslatorServer(options = {}) {
     }
   });
 
+  app.post('/api/profiles/:id/unlock', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    const session = getOrCreateOwnerSession(req, res, profileStore.sessionSecret);
+    const unlockedProfileIds = getUnlockedProfileIds(
+      req,
+      profileStore.sessionSecret
+    );
+    const profileId =
+      req.params?.id || req.body?.profileId || req.body?.id || 'default';
+    const pin = req.body?.pin ?? req.query?.pin ?? '';
+    try {
+      const result = await profileStore.unlockProfile({
+        profileId,
+        pin,
+        ownerProofHash: session.ownerProofHash,
+        unlockedProfileIds,
+      });
+      setUnlockedProfileIdsCookie(
+        req,
+        res,
+        profileStore.sessionSecret,
+        result.unlockedProfileIds
+      );
+      return res.status(200).json(result);
+    } catch (err) {
+      const status = Number(err?.status) || 500;
+      if (err?.body && typeof err.body === 'object') {
+        return res.status(status).json(err.body);
+      }
+      return res.status(status).json({
+        error: err?.message || 'Không thể mở khóa hồ sơ.',
+      });
+    }
+  });
+
   const handleDeleteProfile = async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     const session = getOrCreateOwnerSession(req, res, profileStore.sessionSecret);
+    const unlockedProfileIds = getUnlockedProfileIds(
+      req,
+      profileStore.sessionSecret
+    );
     const profileId =
       req.params?.id ||
       req.body?.profileId ||
@@ -137,7 +219,14 @@ export function createTranslatorServer(options = {}) {
         profileId,
         pin,
         ownerProofHash: session.ownerProofHash,
+        unlockedProfileIds,
       });
+      setUnlockedProfileIdsCookie(
+        req,
+        res,
+        profileStore.sessionSecret,
+        result.unlockedProfileIds
+      );
       return res.status(200).json(result);
     } catch (err) {
       const status = Number(err?.status) || 500;
@@ -156,14 +245,25 @@ export function createTranslatorServer(options = {}) {
   app.post('/api/ephemeral-token', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     const session = getOrCreateOwnerSession(req, res, profileStore.sessionSecret);
+    const unlockedProfileIds = getUnlockedProfileIds(
+      req,
+      profileStore.sessionSecret
+    );
     const profileId = req.body?.profileId || 'default';
     const model = req.body?.model || DEFAULT_MODEL;
+    const pin = req.body?.pin ?? null;
+    const requireDefaultUnlock = Boolean(
+      req.body?.requireUnlock || req.headers['x-glt-client'] === 'web'
+    );
 
     let resolved;
     try {
       resolved = await profileStore.resolveProfileApiKey({
         profileId,
         ownerProofHash: session.ownerProofHash,
+        unlockedProfileIds,
+        pin,
+        requireDefaultUnlock,
         defaultServerApiKey: apiKey,
       });
     } catch (err) {
@@ -172,6 +272,7 @@ export function createTranslatorServer(options = {}) {
         error: err?.message || 'Không thể dùng hồ sơ đã chọn.',
         profileId,
         profileError: true,
+        requiresUnlock: Boolean(err?.requiresUnlock),
       });
     }
 
@@ -229,6 +330,7 @@ export function createTranslatorServer(options = {}) {
     let isGeneratingTurn = false;
     let generationGuardTimer = null;
     const wsOwnerSession = getExistingOwnerSession(req, profileStore.sessionSecret);
+    const wsUnlockedIds = getUnlockedProfileIds(req, profileStore.sessionSecret);
 
     const clearGenerationGuard = () => {
       if (generationGuardTimer) {
@@ -286,6 +388,9 @@ export function createTranslatorServer(options = {}) {
           resolved = await profileStore.resolveProfileApiKey({
             profileId,
             ownerProofHash: wsOwnerSession?.ownerProofHash || '',
+            unlockedProfileIds: wsUnlockedIds,
+            pin: msg.pin ?? null,
+            requireDefaultUnlock: Boolean(msg.requireUnlock),
             defaultServerApiKey: apiKey,
           });
         } catch (err) {

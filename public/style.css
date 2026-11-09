@@ -177,7 +177,7 @@ select option{background:var(--yellow);color:var(--blue)}
 @media(hover:hover){.profile-select:hover:not(:disabled),.profile-delete:hover,.profile-add:hover,.profile-action:hover:not(:disabled),.profile-voice-options button:hover:not([aria-pressed=true]){background:var(--blue);color:var(--yellow)}}
 .profile-empty{font-size:11px;margin:8px 0 0}
 .profile-drawer{display:grid;gap:16px;margin-top:14px;padding:18px 0;border:0;border-top:1.5px solid var(--blue)}
-.profile-drawer h3,.profile-delete-confirm h3{font-size:18px;line-height:1.25;font-weight:800;letter-spacing:-.055em;margin:0}
+.profile-drawer h3,.profile-delete-confirm h3,.profile-unlock-confirm h3{font-size:18px;line-height:1.25;font-weight:800;letter-spacing:-.055em;margin:0}
 .profile-fields{display:grid;grid-template-columns:minmax(0,1fr);gap:14px}
 .profile-field{display:grid;align-content:start;gap:5px;min-width:0}
 .profile-field label,.profile-voice-group legend{font-size:11px;font-weight:600;line-height:1.5}
@@ -199,13 +199,17 @@ select option{background:var(--yellow);color:var(--blue)}
 .profile-delete-confirm{display:grid;gap:12px;padding:16px;margin-top:12px;border:1px solid var(--blue);background:var(--error)}
 .profile-delete-confirm p{font-size:11px;margin:4px 0 0}
 .profile-delete-confirm .profile-field input,.profile-delete-confirm .profile-action:not(.profile-action--primary){background:var(--error)}
+.profile-unlock-confirm{display:grid;gap:12px;padding:16px;margin-top:12px;border:1.5px solid var(--blue);background:var(--paper);color:var(--blue)}
+.profile-unlock-confirm p{font-size:11px;margin:4px 0 0;line-height:1.5}
+.profile-unlock-confirm .profile-field input{background:var(--paper)}
+.profile-unlock-confirm .profile-action:not(.profile-action--primary){background:var(--paper)}
 .rolling-status{grid-column:1/-1;display:grid;grid-template-columns:minmax(0,1fr);gap:0;margin-top:2px;border-top:1px solid var(--blue);border-bottom:1px solid var(--blue);font-size:11px;font-weight:600;line-height:1.5}
 .rolling-listen,.rolling-play{display:flex;align-items:center;gap:9px;min-height:44px;min-width:0;padding:9px 0}
 .rolling-listen{border-bottom:1px solid var(--line)}
 .rolling-mark{width:8px;height:8px;flex:none;background:var(--blue);animation:rolling-mark 1.6s ease-in-out infinite}
 .rolling-play svg{width:17px;height:17px}
 @keyframes rolling-mark{0%,100%{opacity:1}50%{opacity:.45}}
-.profile-drawer:not([hidden]),.profile-delete-confirm:not([hidden]),.rolling-status:not([hidden]){animation:profile-reveal .18s ease-out both}
+.profile-drawer:not([hidden]),.profile-delete-confirm:not([hidden]),.profile-unlock-confirm:not([hidden]),.rolling-status:not([hidden]){animation:profile-reveal .18s ease-out both}
 @keyframes profile-reveal{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 @media(min-width:850px){.profile-bar-wrap{max-height:148px}.profile-title-row h2{font-size:16px}.profile-toolbar{grid-template-columns:minmax(0,1fr) 185px}.profile-fields{grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.profile-field--name{grid-column:1;grid-row:1}.profile-voice-group{grid-column:2;grid-row:1}.profile-field--key{grid-column:1/-1;grid-row:2}.profile-field--pin{grid-column:1;grid-row:3}.profile-cookie-note{grid-column:2;grid-row:3}.rolling-status{grid-template-columns:1fr 1fr}.rolling-listen{border-bottom:0;border-right:1px solid var(--line)}.rolling-play{padding-left:18px}}
 @media(prefers-reduced-motion:reduce){.profile-switcher *,.rolling-status *{animation:none!important;transition:none!important}}

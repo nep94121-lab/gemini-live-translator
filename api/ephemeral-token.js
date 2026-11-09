@@ -3,6 +3,7 @@ import { STRICT_TRANSLATOR_PROMPT } from '../filler-filter.js';
 import {
   createProfileStore,
   getOrCreateOwnerSession,
+  getUnlockedProfileIds,
   sanitizeSecretFromText,
 } from '../profile-store.js';
 
@@ -58,9 +59,14 @@ export default async function handler(req, res) {
   }
 
   const session = getOrCreateOwnerSession(req, res, store.sessionSecret);
+  const unlockedProfileIds = getUnlockedProfileIds(req, store.sessionSecret);
   const profileId =
     req.body?.profileId || req.query?.profileId || 'default';
   const model = req.body?.model || req.query?.model || DEFAULT_MODEL;
+  const pin = req.body?.pin ?? req.query?.pin ?? null;
+  const requireDefaultUnlock = Boolean(
+    req.body?.requireUnlock || req.headers['x-glt-client'] === 'web'
+  );
   const defaultServerApiKey = process.env.GEMINI_API_KEY || '';
 
   let resolved;
@@ -68,6 +74,9 @@ export default async function handler(req, res) {
     resolved = await store.resolveProfileApiKey({
       profileId,
       ownerProofHash: session.ownerProofHash,
+      unlockedProfileIds,
+      pin,
+      requireDefaultUnlock,
       defaultServerApiKey,
     });
   } catch (err) {
@@ -76,6 +85,7 @@ export default async function handler(req, res) {
       error: err?.message || 'Không thể sử dụng hồ sơ đã chọn.',
       profileId,
       profileError: true,
+      requiresUnlock: Boolean(err?.requiresUnlock),
     });
   }
 
