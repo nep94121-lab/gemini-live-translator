@@ -8,6 +8,15 @@ const vnTranscriptBox = document.getElementById('vnTranscriptBox');
 const enTranscriptBox = document.getElementById('enTranscriptBox');
 const vnStatusTag = document.getElementById('vnStatusTag');
 const enStatusTag = document.getElementById('enStatusTag');
+const vnPendingBox = document.getElementById('vnPendingBox');
+const vnLiveBufferBox = document.getElementById('vnLiveBufferBox');
+const vnLiveBufferText = document.getElementById('vnLiveBufferText');
+const enPlaybackBanner = document.getElementById('enPlaybackBanner');
+const enPlaybackBannerText = document.getElementById('enPlaybackBannerText');
+const rollingStatus = document.getElementById('rollingStatus');
+const rollingListenText = document.getElementById('rollingListenText');
+const rollingPlayText = document.getElementById('rollingPlayText');
+
 const speedSlider = document.getElementById('speedSlider');
 const speedValueLabel = document.getElementById('speedValueLabel');
 const noiseGateSlider = document.getElementById('noiseGateSlider');
@@ -23,9 +32,16 @@ const quickTextInput = document.getElementById('quickTextInput');
 const bgKeepAliveAudio = document.getElementById('bgKeepAliveAudio');
 
 const profileBar = document.getElementById('profileBar');
+const profileCountBadge = document.getElementById('profileCountBadge');
+const profileSearchInput = document.getElementById('profileSearchInput');
+const profileSortSelect = document.getElementById('profileSortSelect');
+const profileNoResults = document.getElementById('profileNoResults');
 const btnAddProfile = document.getElementById('btnAddProfile');
 const profileFormDrawer = document.getElementById('profileFormDrawer');
 const profileNameInput = document.getElementById('profileNameInput');
+const voiceGenderMaleBtn = document.getElementById('voiceGenderMaleBtn');
+const voiceGenderFemaleBtn = document.getElementById('voiceGenderFemaleBtn');
+const profileVoiceGenderInput = document.getElementById('profileVoiceGenderInput');
 const profileApiKeyInput = document.getElementById('profileApiKeyInput');
 const profilePinInput = document.getElementById('profilePinInput');
 const profileFormError = document.getElementById('profileFormError');
@@ -33,6 +49,7 @@ const btnSaveProfile = document.getElementById('btnSaveProfile');
 const btnCancelProfile = document.getElementById('btnCancelProfile');
 const profileDeleteConfirm = document.getElementById('profileDeleteConfirm');
 const profileDeleteTargetName = document.getElementById('profileDeleteTargetName');
+const profileDeleteName = document.getElementById('profileDeleteName');
 const profileDeletePinGroup = document.getElementById('profileDeletePinGroup');
 const profileDeletePinInput = document.getElementById('profileDeletePinInput');
 const profileDeleteError = document.getElementById('profileDeleteError');
@@ -40,14 +57,19 @@ const btnConfirmDeleteProfile = document.getElementById('btnConfirmDeleteProfile
 const btnCancelDeleteProfile = document.getElementById('btnCancelDeleteProfile');
 
 const SELECTED_PROFILE_STORAGE_KEY = 'glt_selected_profile_id';
+const RESERVED_DEFAULT_NAMES = new Set(['tôi', 'tuấn anh', 'tuan anh']);
 const DEFAULT_PROFILE_ENTRY = {
   id: 'default',
-  name: 'Tôi',
+  name: 'Tuấn Anh',
   locked: true,
   isOwner: true,
   selectable: true,
   ownerNote: null,
   hasPin: false,
+  voiceGender: 'male',
+  voiceName: 'Puck',
+  voiceLabel: 'Nam',
+  createdAt: 0,
 };
 
 let profilesList = [{ ...DEFAULT_PROFILE_ENTRY }];
@@ -55,6 +77,7 @@ let activeProfileId = 'default';
 let pendingDeleteProfileId = null;
 let isSavingProfile = false;
 let isDeletingProfile = false;
+let selectedFormVoiceGender = 'male';
 
 let liveClientSession = null;
 let isRecording = false;
@@ -78,7 +101,15 @@ let currentTurnStartMs = null;
 let currentTurnFirstByteMs = null;
 let currentVnItem = null;
 let currentVnRawText = '';
-let currentEnItem = null;
+let currentEnTurn = null;
+export const enTurns = [];
+let playbackSyncTimer = null;
+
+let isModelGeneratingTurn = false;
+let rollingInputQueue = [];
+let pendingLiveVnText = '';
+let isCapturingRollingSpeech = false;
+
 const latencyHistory = [];
 const btnCopyTranslation = document.getElementById('btnCopyTranslation');
 const sessionDetails = document.getElementById('sessionDetails');
@@ -122,10 +153,38 @@ function getActiveProfile() {
   );
 }
 
+function setFormVoiceGender(gender = 'male') {
+  selectedFormVoiceGender = gender === 'female' ? 'female' : 'male';
+  if (profileVoiceGenderInput) {
+    profileVoiceGenderInput.value = selectedFormVoiceGender;
+  }
+  if (voiceGenderMaleBtn) {
+    voiceGenderMaleBtn.setAttribute(
+      'aria-pressed',
+      String(selectedFormVoiceGender === 'male')
+    );
+  }
+  if (voiceGenderFemaleBtn) {
+    voiceGenderFemaleBtn.setAttribute(
+      'aria-pressed',
+      String(selectedFormVoiceGender === 'female')
+    );
+  }
+}
+
+voiceGenderMaleBtn?.addEventListener('click', () => {
+  setFormVoiceGender('male');
+});
+voiceGenderFemaleBtn?.addEventListener('click', () => {
+  setFormVoiceGender('female');
+});
+
 function closeActiveLiveClientSession() {
   if (!liveClientSession) return;
   const prev = liveClientSession;
   liveClientSession = null;
+  isModelGeneratingTurn = false;
+  rollingInputQueue = [];
   try {
     prev.close();
   } catch {}
@@ -142,20 +201,76 @@ function setFormError(el, message) {
   }
 }
 
+function getFilteredAndSortedProfiles() {
+  const query = (profileSearchInput?.value || '')
+    .trim()
+    .toLocaleLowerCase('vi');
+  const sortMode = profileSortSelect?.value || 'mine';
+
+  const cloned = profilesList.map((p, idx) => ({
+    ...p,
+    _idx: idx,
+    createdAt: Number(p.createdAt) || 0,
+    voiceLabel: p.voiceLabel || (p.voiceGender === 'female' ? 'Nữ' : 'Nam'),
+  }));
+
+  cloned.sort((a, b) => {
+    if (a.locked) return -1;
+    if (b.locked) return 1;
+
+    if (sortMode === 'mine' || sortMode === 'owner-first') {
+      const ownerDiff = Number(Boolean(b.isOwner)) - Number(Boolean(a.isOwner));
+      if (ownerDiff !== 0) return ownerDiff;
+      return a.name.localeCompare(b.name, 'vi');
+    }
+
+    if (sortMode === 'newest') {
+      if (b.createdAt !== a.createdAt) return b.createdAt - a.createdAt;
+      return b._idx - a._idx;
+    }
+
+    if (sortMode === 'name' || sortMode === 'name-asc') {
+      return a.name.localeCompare(b.name, 'vi');
+    }
+
+    return a._idx - b._idx;
+  });
+
+  if (!query) return cloned;
+  return cloned.filter((p) => p.name.toLocaleLowerCase('vi').includes(query));
+}
+
+function updateProfileCountBadge() {
+  if (!profileCountBadge) return;
+  const total = profilesList.length;
+  const owned = profilesList.filter((p) => p.locked || p.isOwner).length;
+  profileCountBadge.textContent = `${total} hồ sơ · ${owned} của bạn`;
+}
+
 function renderProfileBar() {
-  if (!profileBar || !btnAddProfile) return;
+  if (!profileBar) return;
   const existingItems = profileBar.querySelectorAll('.profile-item');
   existingItems.forEach((node) => node.remove());
+
+  updateProfileCountBadge();
 
   const controlsLocked =
     isRecording || isStarting || isSavingProfile || isDeletingProfile;
 
-  for (const profile of profilesList) {
+  const visibleProfiles = getFilteredAndSortedProfiles();
+
+  if (profileNoResults) {
+    profileNoResults.hidden = visibleProfiles.length > 0;
+  }
+
+  for (const profile of visibleProfiles) {
     const item = document.createElement('div');
     item.className = 'profile-item';
     item.dataset.profileId = profile.id;
+    item.dataset.created = String(Number(profile.createdAt) || 0);
     if (profile.locked) {
       item.dataset.locked = 'true';
+      item.dataset.owner = 'true';
     } else {
       item.dataset.owner = String(Boolean(profile.isOwner));
     }
@@ -170,21 +285,30 @@ function renderProfileBar() {
     const isSelected = profile.id === activeProfileId;
     selectBtn.setAttribute('aria-pressed', String(isSelected));
 
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'profile-name';
+    nameSpan.textContent = profile.name;
+
+    const voiceTag = document.createElement('span');
+    voiceTag.className = 'profile-voice-tag';
+    voiceTag.textContent =
+      profile.voiceLabel || (profile.voiceGender === 'female' ? 'Nữ' : 'Nam');
+
     if (!profile.locked && !profile.isOwner) {
       selectBtn.disabled = true;
       selectBtn.setAttribute('aria-disabled', 'true');
-      selectBtn.title = 'Chỉ chủ hồ sơ';
-      selectBtn.setAttribute('aria-label', `${profile.name} — Chỉ chủ hồ sơ`);
-      const nameSpan = document.createElement('span');
-      nameSpan.className = 'profile-name';
-      nameSpan.textContent = profile.name;
+      selectBtn.title = 'Chỉ chủ hồ sơ có thể sử dụng API key này';
+      selectBtn.setAttribute(
+        'aria-label',
+        `${profile.name} (${voiceTag.textContent}) — Chỉ chủ hồ sơ`
+      );
       const noteSpan = document.createElement('span');
-      noteSpan.className = 'profile-lock-note';
+      noteSpan.className = 'profile-owner-note profile-lock-note';
       noteSpan.textContent = 'Chỉ chủ hồ sơ';
-      selectBtn.append(nameSpan, noteSpan);
+      selectBtn.append(nameSpan, voiceTag, noteSpan);
     } else {
       selectBtn.disabled = controlsLocked;
-      selectBtn.textContent = profile.name;
+      selectBtn.append(nameSpan, voiceTag);
       selectBtn.addEventListener('click', () => {
         handleSelectProfile(profile.id);
       });
@@ -196,6 +320,7 @@ function renderProfileBar() {
       delBtn.className = 'profile-delete';
       delBtn.type = 'button';
       delBtn.dataset.profileId = profile.id;
+      delBtn.dataset.deleteProfileId = profile.id;
       delBtn.setAttribute('aria-label', `Xóa hồ sơ ${profile.name}`);
       delBtn.setAttribute('aria-controls', 'profileDeleteConfirm');
       const isExpanded =
@@ -203,18 +328,32 @@ function renderProfileBar() {
       delBtn.setAttribute('aria-expanded', String(isExpanded));
       delBtn.disabled = controlsLocked;
       delBtn.innerHTML =
-        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>';
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M6 6 18 18M18 6 6 18"/></svg>';
       delBtn.addEventListener('click', () => {
         openDeleteConfirm(profile.id);
       });
       item.appendChild(delBtn);
     }
 
-    profileBar.insertBefore(item, btnAddProfile);
+    if (btnAddProfile && btnAddProfile.parentElement === profileBar) {
+      profileBar.insertBefore(item, btnAddProfile);
+    } else {
+      profileBar.appendChild(item);
+    }
   }
 
-  btnAddProfile.disabled = controlsLocked;
+  if ( btnAddProfile) {
+    btnAddProfile.disabled = isSavingProfile || isDeletingProfile;
+  }
 }
+
+profileSearchInput?.addEventListener('input', () => {
+  renderProfileBar();
+});
+
+profileSortSelect?.addEventListener('change', () => {
+  renderProfileBar();
+});
 
 function closeAddDrawer(restoreFocus = false) {
   if (!profileFormDrawer) return;
@@ -223,6 +362,7 @@ function closeAddDrawer(restoreFocus = false) {
   profileNameInput.value = '';
   profileApiKeyInput.value = '';
   profilePinInput.value = '';
+  setFormVoiceGender('male');
   setFormError(profileFormError, '');
   if (restoreFocus) {
     btnAddProfile?.focus();
@@ -230,13 +370,9 @@ function closeAddDrawer(restoreFocus = false) {
 }
 
 function openAddDrawer() {
-  if (isRecording || isStarting) {
-    showFeedback('Hãy dừng mic trước khi tạo hồ sơ API mới.');
-    return;
-  }
   closeDeleteConfirm(false);
   profileFormDrawer.hidden = false;
-  btnAddProfile.setAttribute('aria-expanded', 'true');
+  btnAddProfile?.setAttribute('aria-expanded', 'true');
   setFormError(profileFormError, '');
   profileNameInput.focus();
 }
@@ -276,7 +412,11 @@ function openDeleteConfirm(profileId) {
 
   closeAddDrawer(false);
   pendingDeleteProfileId = target.id;
-  profileDeleteTargetName.textContent = target.name;
+  if (profileDeleteName) {
+    profileDeleteName.textContent = target.name;
+  } else if (profileDeleteTargetName) {
+    profileDeleteTargetName.textContent = target.name;
+  }
   profileDeletePinInput.value = '';
   setFormError(profileDeleteError, '');
 
@@ -320,9 +460,13 @@ function handleSelectProfile(profileId) {
   }
 
   renderProfileBar();
+  const voiceTag =
+    target.voiceLabel || (target.voiceGender === 'female' ? 'Nữ' : 'Nam');
   setStatus(
     'idle',
-    target.id === 'default' ? 'Sẵn sàng' : `Sẵn sàng · Hồ sơ: ${target.name}`
+    target.id === 'default'
+      ? 'Sẵn sàng'
+      : `Sẵn sàng · Hồ sơ: ${target.name} (${voiceTag})`
   );
 }
 
@@ -376,6 +520,8 @@ profileFormDrawer?.addEventListener('submit', async (e) => {
   const name = profileNameInput.value.trim();
   const apiKey = profileApiKeyInput.value.trim();
   const pin = profilePinInput.value.trim();
+  const voiceGender =
+    profileVoiceGenderInput?.value === 'female' ? 'female' : 'male';
 
   if (!name) {
     setFormError(profileFormError, 'Vui lòng nhập tên hồ sơ.');
@@ -387,10 +533,10 @@ profileFormDrawer?.addEventListener('submit', async (e) => {
     profileNameInput.focus();
     return;
   }
-  if (name.toLocaleLowerCase('vi') === 'tôi') {
+  if (RESERVED_DEFAULT_NAMES.has(name.toLocaleLowerCase('vi'))) {
     setFormError(
       profileFormError,
-      'Tên "Tôi" được dành riêng cho hồ sơ mặc định của chủ web.'
+      'Tên "Tuấn Anh" được dành riêng cho hồ sơ mặc định của chủ web.'
     );
     profileNameInput.focus();
     return;
@@ -422,7 +568,7 @@ profileFormDrawer?.addEventListener('submit', async (e) => {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, apiKey, pin }),
+      body: JSON.stringify({ name, apiKey, pin, voiceGender }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -435,6 +581,9 @@ profileFormDrawer?.addEventListener('submit', async (e) => {
     const createdId = data.profile?.id || 'default';
     activeProfileId = createdId;
     saveSelectedProfileId(activeProfileId);
+    if (profileSearchInput && profileSearchInput.value) {
+      profileSearchInput.value = '';
+    }
     closeActiveLiveClientSession();
     closeAddDrawer(false);
     renderProfileBar();
@@ -444,7 +593,12 @@ profileFormDrawer?.addEventListener('submit', async (e) => {
     );
     activeBtn?.focus();
     const createdName = data.profile?.name || name;
-    setStatus('idle', `Sẵn sàng · Hồ sơ: ${createdName}`);
+    const createdVoiceLabel =
+      data.profile?.voiceLabel || (voiceGender === 'female' ? 'Nữ' : 'Nam');
+    setStatus(
+      'idle',
+      `Sẵn sàng · Hồ sơ: ${createdName} (${createdVoiceLabel})`
+    );
     showFeedback(`Đã lưu và chọn hồ sơ "${createdName}".`);
   } catch (err) {
     const msg = err?.message || 'Không thể lưu hồ sơ.';
@@ -564,7 +718,8 @@ sessionDetails.addEventListener('toggle', () => {
 
 btnCopyTranslation.addEventListener('click', async () => {
   const text = [...enTranscriptBox.querySelectorAll('.utterance-text')]
-    .map((item) => item.textContent)
+    .map((item) => item.textContent.trim())
+    .filter(Boolean)
     .join('\n\n');
   if (!text) return;
   try {
@@ -621,11 +776,6 @@ function base64ToInt16Array(base64) {
   return new Int16Array(bytes.buffer);
 }
 
-/**
- * Khởi tạo AudioContext phát 24kHz có gắn sóng hạ âm giữ thức (-75dB)
- * và kết nối cả MediaStream vào thẻ <audio> để khi khóa màn hình điện thoại
- * hệ điều hành vẫn cấp quyền phát loa liên tục.
- */
 function ensurePlaybackContext() {
   if (!playbackContext) {
     playbackContext = new (window.AudioContext || window.webkitAudioContext)({
@@ -656,7 +806,255 @@ function ensurePlaybackContext() {
   return playbackContext;
 }
 
-function schedulePcm24kPlayback(base64Data) {
+function isSpeakerPlaying() {
+  if (!playbackContext) return false;
+  return (
+    activeAudioSources.length > 0 &&
+    nextPlayTime > playbackContext.currentTime + 0.03
+  );
+}
+
+function setVnUtteranceState(item, state) {
+  if (!item) return;
+  item.dataset.vnState = state;
+  const labelEl = item.querySelector('.utterance-state-label');
+  if (labelEl) {
+    labelEl.textContent =
+      state === 'translating' ? 'Đang dịch sang tiếng Anh' : 'Đã dịch';
+  }
+}
+
+export function showPendingVnBuffer(text) {
+  pendingLiveVnText = text || '';
+  if (!vnPendingBox || !vnLiveBufferText) return;
+  if (!pendingLiveVnText) {
+    vnPendingBox.hidden = true;
+    vnLiveBufferText.textContent = '';
+  } else {
+    vnPendingBox.hidden = false;
+    vnLiveBufferText.textContent = pendingLiveVnText;
+  }
+  syncRollingIndicators();
+}
+
+function renderSpeakingWords(textEl, rawText, progress = 0.35) {
+  if (!textEl) return;
+  const clean = (rawText || '').replace(/\s{2,}/g, ' ').trim();
+  if (!clean) {
+    textEl.textContent = '';
+    return;
+  }
+  const words = clean.split(' ');
+  const total = words.length;
+  if (total === 1) {
+    textEl.innerHTML = '';
+    const activeSpan = document.createElement('span');
+    activeSpan.className = 'word-active';
+    activeSpan.textContent = words[0];
+    textEl.appendChild(activeSpan);
+    return;
+  }
+
+  const clamped = Math.min(0.96, Math.max(0, progress));
+  const activeStart = Math.min(total - 1, Math.floor(clamped * total));
+  const activeCount = total >= 5 ? 2 : 1;
+  const activeEnd = Math.min(total, activeStart + activeCount);
+
+  const spokenPart = words.slice(0, activeStart).join(' ');
+  const activePart = words.slice(activeStart, activeEnd).join(' ');
+  const upcomingPart = words.slice(activeEnd).join(' ');
+
+  textEl.innerHTML = '';
+  if (spokenPart) {
+    const s = document.createElement('span');
+    s.className = 'word-spoken';
+    s.textContent = spokenPart;
+    textEl.appendChild(s);
+    textEl.appendChild(document.createTextNode(' '));
+  }
+  if (activePart) {
+    const a = document.createElement('span');
+    a.className = 'word-active';
+    a.textContent = activePart;
+    textEl.appendChild(a);
+    if (upcomingPart) {
+      textEl.appendChild(document.createTextNode(' '));
+    }
+  }
+  if (upcomingPart) {
+    const u = document.createElement('span');
+    u.className = 'word-upcoming';
+    u.textContent = upcomingPart;
+    textEl.appendChild(u);
+  }
+}
+
+function applyEnTurnState(turn, state, progress = 0.35) {
+  if (!turn || !turn.element) return;
+  turn.state = state;
+  turn.element.dataset.enState = state;
+  const labelEl = turn.element.querySelector('.utterance-state-label');
+  const textEl = turn.element.querySelector('.utterance-text');
+
+  if (labelEl) {
+    if (state === 'speaking') {
+      labelEl.textContent = 'Đang đọc bản dịch';
+    } else if (state === 'queued') {
+      labelEl.textContent = 'Chờ phát tiếp theo';
+    } else {
+      labelEl.textContent = 'Đã phát xong';
+    }
+  }
+
+  if (textEl) {
+    const clean = (turn.rawText || '').replace(/\s{2,}/g, ' ').trim();
+    if (state === 'speaking') {
+      renderSpeakingWords(textEl, clean, progress);
+    } else {
+      textEl.textContent = clean;
+    }
+  }
+}
+
+function syncRollingIndicators() {
+  const nowAudio = playbackContext ? playbackContext.currentTime : 0;
+  let speakingTurn = null;
+  let queuedCount = 0;
+
+  for (const turn of enTurns) {
+    if (turn.manualState) {
+      applyEnTurnState(turn, turn.manualState, turn.manualProgress ?? 0.4);
+      if (turn.manualState === 'speaking') speakingTurn = turn;
+      if (turn.manualState === 'queued') queuedCount += 1;
+      continue;
+    }
+
+    const hasAudioWindow =
+      turn.audioStartTime !== null && turn.audioEndTime > turn.audioStartTime;
+
+    if (hasAudioWindow) {
+      if (nowAudio + 0.02 < turn.audioStartTime) {
+        if (speakingTurn) {
+          applyEnTurnState(turn, 'queued');
+          queuedCount += 1;
+        } else {
+          speakingTurn = turn;
+          applyEnTurnState(turn, 'speaking', 0.1);
+        }
+      } else if (nowAudio <= turn.audioEndTime + 0.04) {
+        if (!speakingTurn) {
+          speakingTurn = turn;
+          const duration = Math.max(0.1, turn.audioEndTime - turn.audioStartTime);
+          const progress =
+            typeof turn.manualProgress === 'number'
+              ? turn.manualProgress
+              : (nowAudio - turn.audioStartTime) / duration;
+          applyEnTurnState(turn, 'speaking', progress);
+        } else {
+          applyEnTurnState(turn, 'queued');
+          queuedCount += 1;
+        }
+      } else {
+        applyEnTurnState(turn, 'played');
+        if (turn.vnItem) {
+          setVnUtteranceState(turn.vnItem, 'translated');
+        }
+      }
+    } else {
+      if (!turn.turnCompleted) {
+        if (!speakingTurn) {
+          speakingTurn = turn;
+          applyEnTurnState(turn, 'speaking', 0.35);
+        } else {
+          applyEnTurnState(turn, 'queued');
+          queuedCount += 1;
+        }
+      } else {
+        const elapsedSinceDone = performance.now() - (turn.completedAtMs || 0);
+        if (elapsedSinceDone < 450 && !speakingTurn) {
+          speakingTurn = turn;
+          applyEnTurnState(turn, 'speaking', Math.min(0.9, elapsedSinceDone / 450));
+        } else {
+          applyEnTurnState(turn, 'played');
+          if (turn.vnItem) {
+            setVnUtteranceState(turn.vnItem, 'translated');
+          }
+        }
+      }
+    }
+  }
+
+  const hasPendingVn = Boolean(pendingLiveVnText) || isCapturingRollingSpeech;
+  const showBanner = Boolean(speakingTurn) || queuedCount > 0;
+  const showRollingBar =
+    showBanner && (isRecording || hasPendingVn || queuedCount > 0);
+
+  if (enPlaybackBanner) {
+    enPlaybackBanner.hidden = !showBanner;
+    if (enPlaybackBannerText) {
+      enPlaybackBannerText.textContent = 'Loa đang đọc · Mic vẫn mở';
+    }
+  }
+
+  if (rollingStatus) {
+    rollingStatus.hidden = !showRollingBar;
+    if (rollingListenText) {
+      rollingListenText.textContent = hasPendingVn
+        ? 'Đang nghe cuốn chiếu câu tiếp...'
+        : 'Đang nghe cuốn chiếu câu tiếp...';
+    }
+    if (rollingPlayText) {
+      rollingPlayText.textContent = 'Đang đọc bản dịch...';
+    }
+  }
+
+  const allVnItems = [
+    ...vnTranscriptBox.querySelectorAll('.utterance-item'),
+  ];
+  if (allVnItems.length > 0) {
+    if (isModelGeneratingTurn || (showBanner && hasPendingVn)) {
+      allVnItems.forEach((item, idx) => {
+        setVnUtteranceState(
+          item,
+          idx === allVnItems.length - 1 ? 'translating' : 'translated'
+        );
+      });
+    } else if (!speakingTurn && queuedCount === 0 && !isModelGeneratingTurn) {
+      allVnItems.forEach((item) => setVnUtteranceState(item, 'translated'));
+    }
+  }
+
+  if (isRecording) {
+    if (showBanner || hasPendingVn) {
+      setStatus('active', 'Đang nghe liên tục');
+      if (hasPendingVn) {
+        vnStatusTag.textContent = 'Đang nghe câu tiếp';
+      }
+    }
+    if (queuedCount > 0) {
+      enStatusTag.textContent = 'Đang đọc và xếp hàng';
+    } else if (!speakingTurn) {
+      enStatusTag.textContent =
+        'Câu tiếp theo được thu ngay cả khi bản dịch đang phát.';
+    }
+  }
+}
+
+function ensurePlaybackSyncLoop() {
+  if (playbackSyncTimer) return;
+  playbackSyncTimer = setInterval(() => {
+    syncRollingIndicators();
+    const anyActive = enTurns.some(
+      (t) => t.state === 'speaking' || t.state === 'queued'
+    );
+    if (!anyActive && !pendingLiveVnText && !isRecording) {
+      clearInterval(playbackSyncTimer);
+      playbackSyncTimer = null;
+    }
+  }, 90);
+}
+
+function schedulePcm24kPlayback(base64Data, targetTurn = currentEnTurn) {
   const ctx = ensurePlaybackContext();
 
   const pcm16 = base64ToInt16Array(base64Data);
@@ -686,12 +1084,24 @@ function schedulePcm24kPlayback(base64Data) {
   source.start(startAt);
 
   const effectiveDuration = audioBuffer.duration / playbackSpeed;
-  nextPlayTime = startAt + effectiveDuration;
+  const endAt = startAt + effectiveDuration;
+  nextPlayTime = endAt;
+
+  if (targetTurn) {
+    if (targetTurn.audioStartTime === null) {
+      targetTurn.audioStartTime = startAt;
+    }
+    targetTurn.audioEndTime = Math.max(targetTurn.audioEndTime || 0, endAt);
+  }
 
   activeAudioSources.push(source);
   source.onended = () => {
     activeAudioSources = activeAudioSources.filter((s) => s !== source);
+    syncRollingIndicators();
   };
+
+  syncRollingIndicators();
+  ensurePlaybackSyncLoop();
 }
 
 function clearAudioQueue() {
@@ -704,32 +1114,58 @@ function clearAudioQueue() {
   if (playbackContext) {
     nextPlayTime = playbackContext.currentTime;
   }
+  syncRollingIndicators();
 }
 
-function appendOrUpdateUtterance(
+export function appendOrUpdateUtterance(
   box,
   currentItem,
   text,
   tagLabel,
-  replaceFull = false
+  replaceFull = false,
+  stateAttr = null
 ) {
   const hint = box.querySelector('.empty-hint');
   if (hint) hint.remove();
 
   if (box === enTranscriptBox) btnCopyTranslation.disabled = false;
 
+  const isVnBox = box === vnTranscriptBox;
+
   if (!currentItem) {
-    const item = document.createElement('div');
+    const item = document.createElement('article');
     item.className = 'utterance-item';
     item.dataset.rawText = text;
+
+    const stateLabel = document.createElement('span');
+    stateLabel.className = 'utterance-state-label';
+
+    if (isVnBox) {
+      const vnState = stateAttr || 'translating';
+      item.dataset.vnState = vnState;
+      stateLabel.textContent =
+        vnState === 'translating' ? 'Đang dịch sang tiếng Anh' : 'Đã dịch';
+    } else {
+      const enState = stateAttr || 'speaking';
+      item.dataset.enState = enState;
+      stateLabel.textContent =
+        enState === 'queued'
+          ? 'Chờ phát tiếp theo'
+          : enState === 'played'
+            ? 'Đã phát xong'
+            : 'Đang đọc bản dịch';
+    }
+
     const contentSpan = document.createElement('span');
     contentSpan.className = 'utterance-text';
     contentSpan.textContent = text.trim();
+
     const metaSpan = document.createElement('span');
     metaSpan.className = 'utterance-meta';
-    metaSpan.textContent = tagLabel;
-    item.appendChild(contentSpan);
-    item.appendChild(metaSpan);
+    metaSpan.hidden = true;
+    metaSpan.textContent = tagLabel || '';
+
+    item.append(stateLabel, contentSpan, metaSpan);
     box.appendChild(item);
     box.scrollTop = box.scrollHeight;
     return item;
@@ -752,6 +1188,45 @@ function appendOrUpdateUtterance(
     box.scrollTop = box.scrollHeight;
     return currentItem;
   }
+}
+
+function ensureCurrentEnTurn(initialText = '') {
+  if (!currentEnTurn) {
+    const anotherSpeaking = enTurns.some((t) => t.state === 'speaking');
+    const initialState = anotherSpeaking ? 'queued' : 'speaking';
+    const element = appendOrUpdateUtterance(
+      enTranscriptBox,
+      null,
+      initialText,
+      `${playbackSpeed.toFixed(2)}x`,
+      true,
+      initialState
+    );
+    currentEnTurn = {
+      element,
+      rawText: initialText,
+      audioStartTime: null,
+      audioEndTime: 0,
+      turnCompleted: false,
+      completedAtMs: 0,
+      state: initialState,
+      vnItem: currentVnItem,
+    };
+    enTurns.push(currentEnTurn);
+    syncRollingIndicators();
+    ensurePlaybackSyncLoop();
+  } else if (initialText) {
+    appendOrUpdateUtterance(
+      enTranscriptBox,
+      currentEnTurn.element,
+      initialText,
+      `${playbackSpeed.toFixed(2)}x`,
+      false
+    );
+    currentEnTurn.rawText = currentEnTurn.element.dataset.rawText || '';
+    syncRollingIndicators();
+  }
+  return currentEnTurn;
 }
 
 function recordTurnLatency(ttfaMs, totalMs, previewText) {
@@ -783,10 +1258,6 @@ function recordTurnLatency(ttfaMs, totalMs, previewText) {
   latencyList.prepend(row);
 }
 
-/**
- * Tạo WAV có tín hiệu dither khác 0 (-75dB) để hệ điều hành điện thoại
- * không nhận diện là "im lặng giả" khi người dùng ấn nút nguồn tắt màn hình.
- */
 function buildNonZeroKeepAliveWavUrl() {
   const sampleRate = 8000;
   const seconds = 2;
@@ -915,37 +1386,61 @@ document.addEventListener('visibilitychange', async () => {
   if (bgKeepAliveAudio?.paused) bgKeepAliveAudio.play().catch(() => {});
 });
 
-function handleServerResponse(response) {
+function flushRollingInputQueue() {
+  if (!liveClientSession || isModelGeneratingTurn || rollingInputQueue.length === 0) {
+    return;
+  }
+
+  const queuedItems = rollingInputQueue.splice(0, rollingInputQueue.length);
+  isCapturingRollingSpeech = false;
+
+  const textEntry = queuedItems.find((item) => typeof item.text === 'string');
+  if (textEntry) {
+    showPendingVnBuffer('');
+    currentTurnStartMs = performance.now();
+    currentTurnFirstByteMs = null;
+    currentVnItem = appendOrUpdateUtterance(
+      vnTranscriptBox,
+      null,
+      textEntry.text,
+      `#${turnCounter + 1}`,
+      true,
+      'translating'
+    );
+    isModelGeneratingTurn = true;
+    liveClientSession.sendRealtimeInput({ text: textEntry.text });
+    return;
+  }
+
+  if (pendingLiveVnText) {
+    showPendingVnBuffer('');
+  }
+
+  let hasStreamEnd = false;
+  for (const item of queuedItems) {
+    if (item.audio) {
+      liveClientSession.sendRealtimeInput({ audio: item.audio });
+    }
+    if (item.audioStreamEnd) {
+      hasStreamEnd = true;
+      currentTurnStartMs = performance.now();
+      currentTurnFirstByteMs = null;
+      liveClientSession.sendRealtimeInput({ audioStreamEnd: true });
+    }
+  }
+  if (hasStreamEnd) {
+    isModelGeneratingTurn = true;
+  }
+}
+
+function stripSsmlTags(text = '') {
+  return String(text || '').replace(/<\/?speak\b[^>]*>/gi, '');
+}
+
+export function handleServerResponse(response) {
   const content = response?.serverContent;
   if (!content) return;
   const now = performance.now();
-
-  if (content.modelTurn?.parts) {
-    for (const part of content.modelTurn.parts) {
-      if (part.inlineData?.data) {
-        if (!currentTurnStartMs) currentTurnStartMs = now - 180;
-        if (!currentTurnFirstByteMs) {
-          currentTurnFirstByteMs = now;
-          enStatusTag.textContent = `Phản hồi: ${Math.round(
-            currentTurnFirstByteMs - currentTurnStartMs
-          )} ms`;
-        }
-        schedulePcm24kPlayback(part.inlineData.data);
-      }
-      if (part.text) {
-        if (!currentTurnStartMs) currentTurnStartMs = now - 180;
-        if (!currentTurnFirstByteMs) {
-          currentTurnFirstByteMs = now;
-        }
-        currentEnItem = appendOrUpdateUtterance(
-          enTranscriptBox,
-          currentEnItem,
-          part.text,
-          `${playbackSpeed.toFixed(2)}x`
-        );
-      }
-    }
-  }
 
   if (content.inputTranscription?.text) {
     const rawVn = content.inputTranscription.text;
@@ -964,43 +1459,98 @@ function handleServerResponse(response) {
       vnStatusTag.textContent = `Đã lọc từ đệm: "${currentVnRawText.trim()}"`;
     } else if (cleanedVn) {
       if (!currentTurnStartMs) currentTurnStartMs = now;
-      vnStatusTag.textContent = 'Đang nhận tiếng Việt';
-      currentVnItem = appendOrUpdateUtterance(
-        vnTranscriptBox,
-        currentVnItem,
-        cleanedVn,
-        `#${turnCounter + 1}`,
-        true
-      );
+      if (isSpeakerPlaying() && currentVnItem && currentEnTurn && isModelGeneratingTurn) {
+        showPendingVnBuffer(cleanedVn);
+      } else {
+        showPendingVnBuffer('');
+        vnStatusTag.textContent = isSpeakerPlaying()
+          ? 'Đang nghe câu tiếp'
+          : 'Đang nhận tiếng Việt';
+        const previousVnItems = vnTranscriptBox.querySelectorAll(
+          '.utterance-item[data-vn-state="translating"]'
+        );
+        previousVnItems.forEach((item) => {
+          if (item !== currentVnItem) {
+            setVnUtteranceState(item, 'translated');
+          }
+        });
+        currentVnItem = appendOrUpdateUtterance(
+          vnTranscriptBox,
+          currentVnItem,
+          cleanedVn,
+          `#${turnCounter + 1}`,
+          true,
+          'translating'
+        );
+        if (currentEnTurn && !currentEnTurn.vnItem) {
+          currentEnTurn.vnItem = currentVnItem;
+        }
+      }
+    }
+  }
+
+  if (content.modelTurn?.parts) {
+    isModelGeneratingTurn = true;
+    for (const part of content.modelTurn.parts) {
+      if (part.inlineData?.data) {
+        if (!currentTurnStartMs) currentTurnStartMs = now - 180;
+        if (!currentTurnFirstByteMs) {
+          currentTurnFirstByteMs = now;
+          enStatusTag.textContent = `Phản hồi: ${Math.round(
+            currentTurnFirstByteMs - currentTurnStartMs
+          )} ms`;
+        }
+        const turn = ensureCurrentEnTurn('');
+        schedulePcm24kPlayback(part.inlineData.data, turn);
+      }
+      if (part.text) {
+        const cleanEn = stripSsmlTags(part.text);
+        if (cleanEn) {
+          if (!currentTurnStartMs) currentTurnStartMs = now - 180;
+          if (!currentTurnFirstByteMs) {
+            currentTurnFirstByteMs = now;
+          }
+          ensureCurrentEnTurn(cleanEn);
+        }
+      }
     }
   }
 
   if (content.outputTranscription?.text) {
-    if (!currentTurnStartMs) currentTurnStartMs = now - 180;
-    if (!currentTurnFirstByteMs) {
-      currentTurnFirstByteMs = now;
-      enStatusTag.textContent = `Phản hồi: ${Math.round(
-        currentTurnFirstByteMs - currentTurnStartMs
-      )} ms`;
+    const cleanOut = stripSsmlTags(content.outputTranscription.text);
+    if (cleanOut) {
+      isModelGeneratingTurn = true;
+      if (!currentTurnStartMs) currentTurnStartMs = now - 180;
+      if (!currentTurnFirstByteMs) {
+        currentTurnFirstByteMs = now;
+        enStatusTag.textContent = `Phản hồi: ${Math.round(
+          currentTurnFirstByteMs - currentTurnStartMs
+        )} ms`;
+      }
+      ensureCurrentEnTurn(cleanOut);
     }
-    currentEnItem = appendOrUpdateUtterance(
-      enTranscriptBox,
-      currentEnItem,
-      content.outputTranscription.text,
-      `${playbackSpeed.toFixed(2)}x`
-    );
   }
 
   if (content.interrupted === true) {
-    clearAudioQueue();
+    if (!isRecording) {
+      clearAudioQueue();
+    }
   }
 
   if (content.turnComplete === true) {
+    isModelGeneratingTurn = false;
+    if (currentVnItem) {
+      setVnUtteranceState(currentVnItem, 'translated');
+    }
+    if (currentEnTurn) {
+      currentEnTurn.turnCompleted = true;
+      currentEnTurn.completedAtMs = now;
+    }
     if (currentTurnStartMs) {
       const ttfa = (currentTurnFirstByteMs || now) - currentTurnStartMs;
       const total = now - currentTurnStartMs;
       const preview =
-        currentEnItem?.querySelector('.utterance-text')?.textContent ||
+        currentEnTurn?.rawText?.trim() ||
         currentVnItem?.querySelector('.utterance-text')?.textContent ||
         '';
       recordTurnLatency(ttfa, total, preview);
@@ -1009,7 +1559,10 @@ function handleServerResponse(response) {
     currentTurnFirstByteMs = null;
     currentVnItem = null;
     currentVnRawText = '';
-    currentEnItem = null;
+    currentEnTurn = null;
+    syncRollingIndicators();
+    ensurePlaybackSyncLoop();
+    flushRollingInputQueue();
   }
 }
 
@@ -1030,10 +1583,15 @@ async function connectDirectGeminiLive() {
     throw new Error(errData.error || `HTTP ${res.status}`);
   }
 
-  const { token, systemInstruction } = await res.json();
+  const { token, systemInstruction, voiceName, voiceGender } = await res.json();
   if (!token) {
     throw new Error('Không nhận được Ephemeral Token từ Server');
   }
+
+  const activeProfile = getActiveProfile();
+  const resolvedVoiceName =
+    voiceName ||
+    ((voiceGender || activeProfile.voiceGender) === 'female' ? 'Kore' : 'Puck');
 
   const ai = new GoogleGenAI({
     apiKey: token,
@@ -1041,10 +1599,29 @@ async function connectDirectGeminiLive() {
     httpOptions: { apiVersion: 'v1alpha' },
   });
 
+  const speechConfig = {
+    voiceConfig: {
+      prebuiltVoiceConfig: {
+        voiceName: resolvedVoiceName,
+      },
+    },
+  };
+
+  const realtimeInputConfig = {
+    activityHandling: 'NO_INTERRUPTION',
+    automaticActivityDetection: {
+      disabled: false,
+      silenceDurationMs: 450,
+      prefixPaddingMs: 120,
+    },
+  };
+
   const isTranslateModel = model.includes('translate');
   const liveConfig = isTranslateModel
     ? {
         responseModalities: [Modality.AUDIO],
+        speechConfig,
+        realtimeInputConfig,
         inputAudioTranscription: {},
         outputAudioTranscription: {},
         translationConfig: {
@@ -1054,6 +1631,8 @@ async function connectDirectGeminiLive() {
       }
     : {
         responseModalities: [Modality.AUDIO],
+        speechConfig,
+        realtimeInputConfig,
         systemInstruction: {
           parts: [{ text: systemInstruction }],
         },
@@ -1082,6 +1661,7 @@ async function connectDirectGeminiLive() {
       onclose: () => {
         if (!sessionRef || liveClientSession === sessionRef) {
           liveClientSession = null;
+          isModelGeneratingTurn = false;
           if (!isRecording) {
             setStatus('idle', 'Đã ngắt kết nối');
           }
@@ -1147,21 +1727,46 @@ async function startLiveSession() {
       if (data.type === 'speech_end') setInputLevel(0);
       if (!liveClientSession) return;
 
+      const rollingActive = isModelGeneratingTurn || isSpeakerPlaying();
+
       if (data.type === 'speech_start') {
-        vnStatusTag.textContent = 'Đang nghe...';
+        if (rollingActive) {
+          isCapturingRollingSpeech = true;
+          vnStatusTag.textContent = 'Đang nghe câu tiếp';
+          if (!pendingLiveVnText) {
+            showPendingVnBuffer('Đang thu âm câu tiếp theo...');
+          }
+        } else {
+          vnStatusTag.textContent = 'Đang nghe...';
+        }
+        syncRollingIndicators();
       } else if (data.type === 'pcm_chunk') {
-        liveClientSession.sendRealtimeInput({
-          audio: {
-            data: arrayBufferToBase64(data.pcm16),
-            mimeType: 'audio/pcm;rate=16000',
-          },
-        });
+        const audioPayload = {
+          data: arrayBufferToBase64(data.pcm16),
+          mimeType: 'audio/pcm;rate=16000',
+        };
+        if (isModelGeneratingTurn) {
+          isCapturingRollingSpeech = true;
+          if (!pendingLiveVnText) {
+            showPendingVnBuffer('Đang thu âm câu tiếp theo...');
+          }
+          rollingInputQueue.push({ audio: audioPayload });
+        } else {
+          liveClientSession.sendRealtimeInput({ audio: audioPayload });
+        }
       } else if (data.type === 'speech_end') {
-        currentTurnStartMs = performance.now();
-        currentTurnFirstByteMs = null;
-        liveClientSession.sendRealtimeInput({
-          audioStreamEnd: true,
-        });
+        isCapturingRollingSpeech = false;
+        if (isModelGeneratingTurn) {
+          rollingInputQueue.push({ audioStreamEnd: true });
+        } else {
+          currentTurnStartMs = performance.now();
+          currentTurnFirstByteMs = null;
+          isModelGeneratingTurn = true;
+          liveClientSession.sendRealtimeInput({
+            audioStreamEnd: true,
+          });
+        }
+        syncRollingIndicators();
       }
     };
 
@@ -1174,6 +1779,7 @@ async function startLiveSession() {
     micBtnLabel.textContent = 'Dừng mic';
     btnToggleMic.setAttribute('aria-pressed', 'true');
     setStatus('active', 'Đang nghe');
+    syncRollingIndicators();
   } catch (err) {
     await stopLiveSession();
     setStatus(
@@ -1190,6 +1796,10 @@ async function startLiveSession() {
 
 async function stopLiveSession() {
   isRecording = false;
+  isModelGeneratingTurn = false;
+  isCapturingRollingSpeech = false;
+  rollingInputQueue = [];
+  showPendingVnBuffer('');
   btnToggleMic.setAttribute('aria-pressed', 'false');
   setInputLevel(0);
   btnToggleMic.classList.remove('recording');
@@ -1200,7 +1810,7 @@ async function stopLiveSession() {
   currentTurnFirstByteMs = null;
   currentVnItem = null;
   currentVnRawText = '';
-  currentEnItem = null;
+  currentEnTurn = null;
 
   if (watchdogInterval) {
     clearInterval(watchdogInterval);
@@ -1234,6 +1844,10 @@ async function stopLiveSession() {
   }
   closeActiveLiveClientSession();
   clearAudioQueue();
+  for (const turn of enTurns) {
+    applyEnTurnState(turn, 'played');
+  }
+  syncRollingIndicators();
   renderProfileBar();
 }
 
@@ -1278,6 +1892,7 @@ modelSelect.addEventListener('change', async () => {
 });
 
 btnClearHistory.addEventListener('click', () => {
+  clearAudioQueue();
   vnTranscriptBox.innerHTML =
     '<p class="empty-hint">Bật mic.<br />Nói điều bạn muốn.</p>';
   enTranscriptBox.innerHTML =
@@ -1286,15 +1901,19 @@ btnClearHistory.addEventListener('click', () => {
     '<p class="empty-hint">Có bản dịch đầu tiên, độ trễ sẽ hiển thị ở đây.</p>';
   currentVnItem = null;
   currentVnRawText = '';
-  currentEnItem = null;
+  currentEnTurn = null;
+  enTurns.length = 0;
+  showPendingVnBuffer('');
   currentTurnStartMs = null;
   currentTurnFirstByteMs = null;
   btnCopyTranslation.disabled = true;
   vnStatusTag.textContent = 'Tiếng Việt';
-  enStatusTag.textContent = 'Bản dịch được đọc tự động khi có phản hồi.';
+  enStatusTag.textContent =
+    'Câu tiếp theo được thu ngay cả khi bản dịch đang phát.';
   latencyHistory.length = 0;
   turnCounter = 0;
   avgLatencyLabel.textContent = 'TB: -- ms';
+  syncRollingIndicators();
 });
 
 quickTextForm.addEventListener('submit', async (e) => {
@@ -1319,19 +1938,30 @@ quickTextForm.addEventListener('submit', async (e) => {
     }
   }
 
+  if (isModelGeneratingTurn) {
+    showPendingVnBuffer(cleaned);
+    rollingInputQueue.push({ text: cleaned });
+    syncRollingIndicators();
+    return;
+  }
+
   currentVnItem = null;
   currentVnRawText = '';
-  currentEnItem = null;
+  currentEnTurn = null;
   currentTurnStartMs = performance.now();
   currentTurnFirstByteMs = null;
+  isModelGeneratingTurn = true;
 
   currentVnItem = appendOrUpdateUtterance(
     vnTranscriptBox,
     null,
     cleaned,
-    `#${turnCounter + 1}`
+    `#${turnCounter + 1}`,
+    true,
+    'translating'
   );
   liveClientSession.sendRealtimeInput({ text: cleaned });
+  syncRollingIndicators();
 });
 
 async function loadInitialConfig() {
@@ -1340,12 +1970,16 @@ async function loadInitialConfig() {
     const res = await fetch('/api/config', { credentials: 'same-origin' });
     const cfg = await res.json();
     const active = getActiveProfile();
+    const voiceTag =
+      active.voiceLabel || (active.voiceGender === 'female' ? 'Nữ' : 'Nam');
     if (!cfg.hasConfiguredKey && active.id === 'default') {
       setStatus('error', 'Chưa cấu hình GEMINI_API_KEY');
     } else {
       setStatus(
         'idle',
-        active.id === 'default' ? 'Sẵn sàng' : `Sẵn sàng · Hồ sơ: ${active.name}`
+        active.id === 'default'
+          ? 'Sẵn sàng'
+          : `Sẵn sàng · Hồ sơ: ${active.name} (${voiceTag})`
       );
     }
   } catch {

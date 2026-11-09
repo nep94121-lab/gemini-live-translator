@@ -3,8 +3,36 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const OWNER_COOKIE_NAME = 'glt_owner_session';
+export const DEFAULT_PROFILE_NAME = 'Tuấn Anh';
 export const MAX_PIN_ATTEMPTS = 5;
 export const PIN_LOCKOUT_MS = 15 * 60 * 1000;
+
+export const VOICE_GENDER_MAP = {
+  male: {
+    voiceGender: 'male',
+    voiceName: 'Puck',
+    voiceLabel: 'Nam',
+  },
+  female: {
+    voiceGender: 'female',
+    voiceName: 'Kore',
+    voiceLabel: 'Nữ',
+  },
+};
+
+export function normalizeVoiceGender(rawGender) {
+  if (!rawGender || typeof rawGender !== 'string') return 'male';
+  const v = rawGender.trim().toLocaleLowerCase('vi');
+  if (v === 'female' || v === 'nu' || v === 'nữ' || v === 'f' || v === 'kore') {
+    return 'female';
+  }
+  return 'male';
+}
+
+export function getVoiceMetadata(rawGender) {
+  const gender = normalizeVoiceGender(rawGender);
+  return VOICE_GENDER_MAP[gender] || VOICE_GENDER_MAP.male;
+}
 
 export function sanitizeSecretFromText(text, secretKey = '') {
   if (!text || typeof text !== 'string') return '';
@@ -240,7 +268,13 @@ export class FileStorageAdapter {
 }
 
 export class GitHubRepoStorageAdapter {
-  constructor({ repo, token, filePath = 'profiles.json', apiBase = 'https://api.github.com' }) {
+  constructor({
+    repo,
+    token,
+    filePath = 'profiles.json',
+    apiBase = 'https://api.github.com',
+    cacheTtlMs = 2000,
+  }) {
     if (!repo || !token) {
       throw new Error(
         'Thiếu cấu hình kho dữ liệu bền vững (PROFILE_STORE_GITHUB_REPO / PROFILE_STORE_GITHUB_TOKEN).'
@@ -250,7 +284,11 @@ export class GitHubRepoStorageAdapter {
     this.token = token.trim();
     this.filePath = filePath.replace(/^\/+/, '');
     this.apiBase = apiBase.replace(/\/+$/, '');
+    this.cacheTtlMs = Number(cacheTtlMs) >= 0 ? Number(cacheTtlMs) : 2000;
     this._queue = Promise.resolve();
+    this._cachedSnapshot = null;
+    this._cachedAt = 0;
+    this._inflightRead = null;
   }
 
   _headers(extra = {}) {
@@ -268,35 +306,83 @@ export class GitHubRepoStorageAdapter {
     return `${this.apiBase}/repos/${this.repo}/contents/${this.filePath}`;
   }
 
-  async readState() {
-    const res = await fetch(this._url(), {
-      method: 'GET',
-      headers: this._headers(),
-    });
-    if (res.status === 404) {
-      return { state: { version: 1, updatedAt: 0, profiles: [] }, sha: null };
+  async readState(forceRefresh = false) {
+    const now = Date.now();
+    if (
+      !forceRefresh &&
+      this._cachedSnapshot &&
+      this.cacheTtlMs > 0 &&
+      now - this._cachedAt <= this.cacheTtlMs
+    ) {
+      return {
+        state: structuredClone(this._cachedSnapshot.state),
+        sha: this._cachedSnapshot.sha,
+      };
     }
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`Không thể đọc kho hồ sơ (${res.status}): ${text.slice(0, 120)}`);
+
+    if (!forceRefresh && this._inflightRead) {
+      const shared = await this._inflightRead;
+      return {
+        state: structuredClone(shared.state),
+        sha: shared.sha,
+      };
     }
-    const data = await res.json();
-    const rawContent = Buffer.from(String(data.content || ''), 'base64').toString('utf8');
-    const parsed = rawContent.trim() ? JSON.parse(rawContent) : {};
-    return {
-      state: {
-        version: 1,
-        updatedAt: Number(parsed?.updatedAt || 0),
-        profiles: Array.isArray(parsed?.profiles) ? parsed.profiles : [],
-      },
-      sha: data.sha || null,
-    };
+
+    const fetchPromise = (async () => {
+      const res = await fetch(this._url(), {
+        method: 'GET',
+        headers: this._headers(),
+      });
+      if (res.status === 404) {
+        const emptySnap = {
+          state: { version: 1, updatedAt: 0, profiles: [] },
+          sha: null,
+        };
+        this._cachedSnapshot = emptySnap;
+        this._cachedAt = Date.now();
+        return emptySnap;
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Không thể đọc kho hồ sơ (${res.status}): ${text.slice(0, 120)}`);
+      }
+      const data = await res.json();
+      const rawContent = Buffer.from(String(data.content || ''), 'base64').toString('utf8');
+      const parsed = rawContent.trim() ? JSON.parse(rawContent) : {};
+      const snap = {
+        state: {
+          version: 1,
+          updatedAt: Number(parsed?.updatedAt || 0),
+          profiles: Array.isArray(parsed?.profiles) ? parsed.profiles : [],
+        },
+        sha: data.sha || null,
+      };
+      this._cachedSnapshot = snap;
+      this._cachedAt = Date.now();
+      return snap;
+    })();
+
+    if (!forceRefresh) {
+      this._inflightRead = fetchPromise;
+    }
+    try {
+      const snap = await fetchPromise;
+      return {
+        state: structuredClone(snap.state),
+        sha: snap.sha,
+      };
+    } finally {
+      if (this._inflightRead === fetchPromise) {
+        this._inflightRead = null;
+      }
+    }
   }
 
   mutateState(mutatorFn) {
     const run = async () => {
-      for (let attempt = 0; attempt < 6; attempt++) {
-        const { state, sha } = await this.readState();
+      let forceRefresh = false;
+      for (let attempt = 0; attempt < 30; attempt++) {
+        const { state, sha } = await this.readState(forceRefresh);
         const working = structuredClone(state);
         const result = await mutatorFn(working);
         if (result?.changed === false) {
@@ -318,7 +404,10 @@ export class GitHubRepoStorageAdapter {
           body: JSON.stringify(body),
         });
         if (putRes.status === 409 || putRes.status === 422) {
-          await new Promise((r) => setTimeout(r, 80 * (attempt + 1)));
+          forceRefresh = true;
+          this._cachedSnapshot = null;
+          const jitter = Math.floor(Math.random() * 75);
+          await new Promise((r) => setTimeout(r, 45 * Math.min(attempt + 1, 8) + jitter));
           continue;
         }
         if (!putRes.ok) {
@@ -327,6 +416,13 @@ export class GitHubRepoStorageAdapter {
             `Không thể lưu hồ sơ vào kho dữ liệu (${putRes.status}): ${errText.slice(0, 120)}`
           );
         }
+        const putData = await putRes.json().catch(() => ({}));
+        const nextSha = putData?.content?.sha || null;
+        this._cachedSnapshot = {
+          state: structuredClone(working),
+          sha: nextSha,
+        };
+        this._cachedAt = Date.now();
         return result;
       }
       throw new Error('Xung đột ghi đồng thời vào kho hồ sơ, vui lòng thử lại.');
@@ -338,15 +434,20 @@ export class GitHubRepoStorageAdapter {
 }
 
 export function serializeProfilesForOwner(storedProfiles = [], ownerProofHash = '') {
+  const defaultVoice = getVoiceMetadata('male');
   const list = [
     {
       id: 'default',
-      name: 'Tôi',
+      name: DEFAULT_PROFILE_NAME,
       locked: true,
       isOwner: true,
       selectable: true,
       ownerNote: null,
       hasPin: false,
+      voiceGender: defaultVoice.voiceGender,
+      voiceName: defaultVoice.voiceName,
+      voiceLabel: defaultVoice.voiceLabel,
+      createdAt: 0,
     },
   ];
   for (const p of storedProfiles) {
@@ -354,6 +455,7 @@ export function serializeProfilesForOwner(storedProfiles = [], ownerProofHash = 
     const isOwner = Boolean(
       ownerProofHash && isTimingSafeHexEqual(p.ownerProofHash, ownerProofHash)
     );
+    const voiceMeta = getVoiceMetadata(p.voiceGender);
     list.push({
       id: p.id,
       name: p.name,
@@ -362,6 +464,9 @@ export function serializeProfilesForOwner(storedProfiles = [], ownerProofHash = 
       selectable: isOwner,
       ownerNote: isOwner ? null : 'Chỉ chủ hồ sơ',
       hasPin: Boolean(p.hasPin),
+      voiceGender: voiceMeta.voiceGender,
+      voiceName: voiceMeta.voiceName,
+      voiceLabel: voiceMeta.voiceLabel,
       createdAt: Number(p.createdAt || 0),
     });
   }
@@ -378,10 +483,11 @@ export function createProfileStore(options = {}) {
   const githubToken =
     options.githubToken ?? process.env.PROFILE_STORE_GITHUB_TOKEN ?? '';
 
+  const filePath = options.filePath ?? process.env.PROFILE_STORE_FILE_PATH ?? '';
   let adapter = options.storageAdapter || null;
   if (!adapter) {
-    if (options.filePath) {
-      adapter = new FileStorageAdapter(options.filePath);
+    if (filePath) {
+      adapter = new FileStorageAdapter(filePath);
     } else if (githubRepo && githubToken) {
       adapter = new GitHubRepoStorageAdapter({
         repo: githubRepo,
@@ -415,7 +521,7 @@ export function createProfileStore(options = {}) {
       return serializeProfilesForOwner(state.profiles, ownerProofHash);
     },
 
-    async createProfile({ name, apiKey, pin, ownerProofHash }) {
+    async createProfile({ name, apiKey, pin, voiceGender, ownerProofHash }) {
       if (!ownerProofHash) {
         const err = new Error('Không xác định được phiên chủ sở hữu.');
         err.status = 401;
@@ -432,8 +538,11 @@ export function createProfileStore(options = {}) {
         err.status = 400;
         throw err;
       }
-      if (cleanName.toLocaleLowerCase('vi') === 'tôi') {
-        const err = new Error('Tên "Tôi" được dành riêng cho hồ sơ mặc định của chủ web.');
+      const lowerName = cleanName.toLocaleLowerCase('vi');
+      if (lowerName === 'tôi' || lowerName === 'tuấn anh' || lowerName === 'tuan anh') {
+        const err = new Error(
+          `Tên "${DEFAULT_PROFILE_NAME}" được dành riêng cho hồ sơ mặc định của chủ web.`
+        );
         err.status = 400;
         throw err;
       }
@@ -458,6 +567,7 @@ export function createProfileStore(options = {}) {
         throw err;
       }
 
+      const voiceMeta = getVoiceMetadata(voiceGender);
       const profileId = `prof_${crypto.randomBytes(8).toString('hex')}`;
       const encryptedKey = encryptApiKey(
         cleanKey,
@@ -477,6 +587,8 @@ export function createProfileStore(options = {}) {
         hasPin: Boolean(cleanPin),
         pinSalt,
         pinHash,
+        voiceGender: voiceMeta.voiceGender,
+        voiceName: voiceMeta.voiceName,
         failedPinAttempts: 0,
         pinLockedUntil: 0,
         createdAt,
@@ -499,7 +611,7 @@ export function createProfileStore(options = {}) {
     async deleteProfile({ profileId, pin, ownerProofHash }) {
       const targetId = typeof profileId === 'string' ? profileId.trim() : '';
       if (!targetId || targetId === 'default') {
-        const err = new Error('Không thể xóa hồ sơ mặc định "Tôi".');
+        const err = new Error(`Không thể xóa hồ sơ mặc định "${DEFAULT_PROFILE_NAME}".`);
         err.status = 403;
         throw err;
       }
@@ -634,10 +746,14 @@ export function createProfileStore(options = {}) {
           err.status = 400;
           throw err;
         }
+        const defaultVoice = getVoiceMetadata('male');
         return {
           apiKey: defaultServerApiKey,
           profileId: 'default',
-          profileName: 'Tôi',
+          profileName: DEFAULT_PROFILE_NAME,
+          voiceGender: defaultVoice.voiceGender,
+          voiceName: defaultVoice.voiceName,
+          voiceLabel: defaultVoice.voiceLabel,
           isCustomProfile: false,
         };
       }
@@ -669,10 +785,14 @@ export function createProfileStore(options = {}) {
         record.ownerProofHash,
         encryptionKey
       );
+      const voiceMeta = getVoiceMetadata(record.voiceGender);
       return {
         apiKey: decryptedKey,
         profileId: record.id,
         profileName: record.name,
+        voiceGender: voiceMeta.voiceGender,
+        voiceName: voiceMeta.voiceName,
+        voiceLabel: voiceMeta.voiceLabel,
         isCustomProfile: true,
       };
     },

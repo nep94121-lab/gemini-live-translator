@@ -45,6 +45,7 @@ export default async function handler(req, res) {
         name: req.body?.name,
         apiKey: req.body?.apiKey,
         pin: req.body?.pin,
+        voiceGender: req.body?.voiceGender,
         ownerProofHash: session.ownerProofHash,
       });
       return res.status(201).json(result);

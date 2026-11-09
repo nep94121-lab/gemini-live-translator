@@ -9,11 +9,38 @@ import {
 const DEFAULT_MODEL = process.env.GEMINI_LIVE_MODEL || 'gemini-3.8-live';
 
 let cachedStore = null;
+const inflightTokenPromises = new Map();
+
 function getStore() {
   if (!cachedStore) {
     cachedStore = createProfileStore();
   }
   return cachedStore;
+}
+
+async function createOrCoalesceToken(activeKey, cacheKey) {
+  if (inflightTokenPromises.has(cacheKey)) {
+    return inflightTokenPromises.get(cacheKey);
+  }
+  const p = (async () => {
+    const client = new GoogleGenAI({
+      apiKey: activeKey,
+      vertexai: false,
+      httpOptions: { apiVersion: 'v1alpha' },
+    });
+    const token = await client.authTokens.create({
+      config: {
+        uses: 50,
+      },
+    });
+    return token?.name || null;
+  })();
+  inflightTokenPromises.set(cacheKey, p);
+  try {
+    return await p;
+  } finally {
+    inflightTokenPromises.delete(cacheKey);
+  }
 }
 
 export default async function handler(req, res) {
@@ -53,23 +80,17 @@ export default async function handler(req, res) {
   }
 
   try {
-    const client = new GoogleGenAI({
-      apiKey: resolved.apiKey,
-      vertexai: false,
-      httpOptions: { apiVersion: 'v1alpha' },
-    });
-
-    const token = await client.authTokens.create({
-      config: {
-        uses: 10,
-      },
-    });
+    const coalesceKey = `${resolved.profileId}:${resolved.isCustomProfile ? session.ownerProofHash : 'shared-default'}`;
+    const tokenName = await createOrCoalesceToken(resolved.apiKey, coalesceKey);
 
     return res.status(200).json({
-      token: token?.name || null,
+      token: tokenName,
       model,
       profileId: resolved.profileId,
       profileName: resolved.profileName,
+      voiceGender: resolved.voiceGender,
+      voiceName: resolved.voiceName,
+      voiceLabel: resolved.voiceLabel,
       systemInstruction: STRICT_TRANSLATOR_PROMPT,
     });
   } catch (err) {

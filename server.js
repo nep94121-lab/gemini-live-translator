@@ -47,7 +47,7 @@ export function createTranslatorServer(options = {}) {
       });
       const token = await client.authTokens.create({
         config: {
-          uses: 10,
+          uses: 50,
         },
       });
       return token?.name || null;
@@ -103,6 +103,7 @@ export function createTranslatorServer(options = {}) {
         name: req.body?.name,
         apiKey: req.body?.apiKey,
         pin: req.body?.pin,
+        voiceGender: req.body?.voiceGender,
         ownerProofHash: session.ownerProofHash,
       });
       return res.status(201).json(created);
@@ -179,12 +180,17 @@ export function createTranslatorServer(options = {}) {
         activeKey: resolved.apiKey,
         model,
         profileId: resolved.profileId,
+        voiceGender: resolved.voiceGender,
+        voiceName: resolved.voiceName,
       });
       return res.json({
         token: tokenName,
         model,
         profileId: resolved.profileId,
         profileName: resolved.profileName,
+        voiceGender: resolved.voiceGender,
+        voiceName: resolved.voiceName,
+        voiceLabel: resolved.voiceLabel,
         systemInstruction: STRICT_TRANSLATOR_PROMPT,
       });
     } catch (err) {
@@ -208,14 +214,48 @@ export function createTranslatorServer(options = {}) {
   });
 
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws/live' });
+  const wss = new WebSocketServer({
+    server,
+    path: '/ws/live',
+    maxPayload: 5 * 1024 * 1024,
+  });
 
   wss.on('connection', (ws, req) => {
     let geminiSession = null;
     let filterFillersEnabled = true;
     let pendingQueue = [];
+    let rollingQueue = [];
     let isSessionReady = false;
+    let isGeneratingTurn = false;
+    let generationGuardTimer = null;
     const wsOwnerSession = getExistingOwnerSession(req, profileStore.sessionSecret);
+
+    const clearGenerationGuard = () => {
+      if (generationGuardTimer) {
+        clearTimeout(generationGuardTimer);
+        generationGuardTimer = null;
+      }
+    };
+
+    const markGenerating = () => {
+      isGeneratingTurn = true;
+      clearGenerationGuard();
+      generationGuardTimer = setTimeout(() => {
+        isGeneratingTurn = false;
+        flushRollingQueue();
+      }, 6500);
+    };
+
+    const flushRollingQueue = () => {
+      if (!geminiSession || !isSessionReady || isGeneratingTurn) return;
+      while (rollingQueue.length > 0 && !isGeneratingTurn) {
+        const nextPayload = rollingQueue.shift();
+        geminiSession.sendRealtimeInput(nextPayload);
+        if (nextPayload.text || nextPayload.audioStreamEnd) {
+          markGenerating();
+        }
+      }
+    };
 
     const sendToClient = (payload) => {
       if (ws.readyState === ws.OPEN) {
@@ -236,7 +276,10 @@ export function createTranslatorServer(options = {}) {
         const model = msg.model || DEFAULT_MODEL;
         filterFillersEnabled = msg.filterFillers !== false;
         isSessionReady = false;
+        isGeneratingTurn = false;
+        clearGenerationGuard();
         pendingQueue = [];
+        rollingQueue = [];
 
         let resolved;
         try {
@@ -268,10 +311,28 @@ export function createTranslatorServer(options = {}) {
             httpOptions: { apiVersion: 'v1beta' },
           });
 
+          const lockedVoiceName = resolved.voiceName || 'Puck';
+          const speechConfig = {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: lockedVoiceName,
+              },
+            },
+          };
+          const realtimeInputConfig = {
+            activityHandling: 'NO_INTERRUPTION',
+            automaticActivityDetection: {
+              silenceDurationMs: 450,
+              prefixPaddingMs: 120,
+            },
+          };
+
           const isTranslateModel = model.includes('translate');
           const liveConfig = isTranslateModel
             ? {
                 responseModalities: [Modality.AUDIO],
+                speechConfig,
+                realtimeInputConfig,
                 inputAudioTranscription: {},
                 outputAudioTranscription: {},
                 translationConfig: {
@@ -281,6 +342,8 @@ export function createTranslatorServer(options = {}) {
               }
             : {
                 responseModalities: [Modality.AUDIO],
+                speechConfig,
+                realtimeInputConfig,
                 systemInstruction: {
                   parts: [{ text: STRICT_TRANSLATOR_PROMPT }],
                 },
@@ -306,6 +369,8 @@ export function createTranslatorServer(options = {}) {
                     model,
                     profileId: resolved.profileId,
                     profileName: resolved.profileName,
+                    voiceGender: resolved.voiceGender,
+                    voiceName: lockedVoiceName,
                   });
                 }
 
@@ -313,6 +378,7 @@ export function createTranslatorServer(options = {}) {
                 if (!content) return;
 
                 if (content.modelTurn?.parts) {
+                  if (!isGeneratingTurn) markGenerating();
                   for (const part of content.modelTurn.parts) {
                     if (part.inlineData?.data) {
                       sendToClient({
@@ -350,6 +416,7 @@ export function createTranslatorServer(options = {}) {
                 }
 
                 if (content.outputTranscription?.text) {
+                  if (!isGeneratingTurn) markGenerating();
                   sendToClient({
                     type: 'output_transcription',
                     text: content.outputTranscription.text,
@@ -365,13 +432,18 @@ export function createTranslatorServer(options = {}) {
                 }
 
                 if (content.turnComplete === true) {
+                  isGeneratingTurn = false;
+                  clearGenerationGuard();
                   sendToClient({
                     type: 'turn_complete',
                     serverTimestamp: Date.now(),
                   });
+                  flushRollingQueue();
                 }
               },
               onerror: (err) => {
+                isGeneratingTurn = false;
+                clearGenerationGuard();
                 sendToClient({
                   type: 'error',
                   message: sanitizeSecretFromText(
@@ -382,6 +454,8 @@ export function createTranslatorServer(options = {}) {
               },
               onclose: (evt) => {
                 isSessionReady = false;
+                isGeneratingTurn = false;
+                clearGenerationGuard();
                 sendToClient({
                   type: 'status',
                   status: 'closed',
@@ -399,13 +473,16 @@ export function createTranslatorServer(options = {}) {
               model,
               profileId: resolved.profileId,
               profileName: resolved.profileName,
+              voiceGender: resolved.voiceGender,
+              voiceName: lockedVoiceName,
             });
           }
 
           for (const item of pendingQueue) {
-            geminiSession.sendRealtimeInput(item);
+            rollingQueue.push(item);
           }
           pendingQueue = [];
+          flushRollingQueue();
         } catch (err) {
           const cleanErr = sanitizeSecretFromText(
             String(err?.message || err),
@@ -429,10 +506,17 @@ export function createTranslatorServer(options = {}) {
       }
 
       const sendOrQueue = (payload) => {
-        if (geminiSession && isSessionReady) {
-          geminiSession.sendRealtimeInput(payload);
-        } else {
+        if (!geminiSession || !isSessionReady) {
           pendingQueue.push(payload);
+          return;
+        }
+        if (isGeneratingTurn) {
+          rollingQueue.push(payload);
+          return;
+        }
+        geminiSession.sendRealtimeInput(payload);
+        if (payload.text || payload.audioStreamEnd) {
+          markGenerating();
         }
       };
 
@@ -445,11 +529,9 @@ export function createTranslatorServer(options = {}) {
             },
           });
         } else if (msg.type === 'audio_stream_end') {
-          if (geminiSession && isSessionReady) {
-            geminiSession.sendRealtimeInput({
-              audioStreamEnd: true,
-            });
-          }
+          sendOrQueue({
+            audioStreamEnd: true,
+          });
         } else if (msg.type === 'text' && msg.text) {
           const cleaned = cleanVietnameseFillers(msg.text, filterFillersEnabled);
           if (!cleaned) {
@@ -471,12 +553,15 @@ export function createTranslatorServer(options = {}) {
           });
           sendOrQueue({ text: cleaned });
         } else if (msg.type === 'stop') {
+          clearGenerationGuard();
+          isGeneratingTurn = false;
           if (geminiSession) {
             geminiSession.close();
             geminiSession = null;
           }
           isSessionReady = false;
           pendingQueue = [];
+          rollingQueue = [];
         }
       } catch (err) {
         sendToClient({
@@ -487,6 +572,8 @@ export function createTranslatorServer(options = {}) {
     });
 
     ws.on('close', () => {
+      clearGenerationGuard();
+      isGeneratingTurn = false;
       if (geminiSession) {
         try {
           geminiSession.close();
@@ -495,6 +582,7 @@ export function createTranslatorServer(options = {}) {
       }
       isSessionReady = false;
       pendingQueue = [];
+      rollingQueue = [];
     });
   });
 

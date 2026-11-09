@@ -15,7 +15,8 @@ CRITICAL RULES:
 4. DISFLUENCY & NOISE FILTER: Completely ignore hesitation sounds, Vietnamese filler words ("à", "ừ", "ờ", "ừm", "ạ ừm", "ờm", "ưm", "kiểu như"), throat clearing, breathing, or background noise.
    - If the input consists only of filler sounds ("à...", "ừm...", "ạ ừm"), remain completely silent and output NOTHING.
    - When translating a sentence containing fillers or self-corrections, output ONLY the clean, fluent English translation without "uh" or "um".
-5. Speak at a brisk, natural, clear pace without any preamble or commentary.`;
+5. Speak at a brisk, natural, clear pace without any preamble or commentary.
+6. VOICE CONSISTENCY: Always speak in a single, steady, consistent vocal tone, pitch, and persona throughout the entire session. Never switch voices, genders, accents, or vocal registers between sentences.`;
 
 const STANDALONE_FILLER_REGEX = /^[\s,.;:!?…\-–—]*(?:à+|ừ+|ờ+|ừm+|ờm+|ưm+|ạ+|ơ+|hơ+|ờ\s*hơ+|ạ\s*ừm+|à\s*ừm+|à\s*ừ+|ừ\s*à+|uh+|um+|hmm+|er+|ah+)[\s,.;:!?…\-–—]*$/i;
 

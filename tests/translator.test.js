@@ -43,15 +43,16 @@ test('1. Bộ lọc từ ngập ngừng tiếng Việt ("à, ừ, ạ ừm") ho�
   assert.equal(cleanedWithNonce, `Mã kiểm thử ${nonce} đang chạy tốt`);
 });
 
-test('2. System Prompt khóa chặt vai trò Phiên dịch viên Việt -> Anh (không trả lời câu hỏi)', () => {
+test('2. System Prompt khóa chặt vai trò Phiên dịch viên Việt -> Anh và giữ cố định giọng đọc', () => {
   assert.match(STRICT_TRANSLATOR_PROMPT, /Vietnamese-to-English/i);
   assert.match(STRICT_TRANSLATOR_PROMPT, /NEVER answer questions/i);
   assert.match(STRICT_TRANSLATOR_PROMPT, /Bạn tên là gì\?/);
   assert.match(STRICT_TRANSLATOR_PROMPT, /What's your name\?/);
   assert.match(STRICT_TRANSLATOR_PROMPT, /ạ ừm/);
+  assert.match(STRICT_TRANSLATOR_PROMPT, /VOICE CONSISTENCY/i);
 });
 
-test('3. Server HTTP, Giao diện gọn 4 khối, Zero-Leak và Kết nối thực tế WebSocket /ws/live tới Gemini Live API (không lỗi 404)', async () => {
+test('3. Server HTTP, Giao diện Swiss thống nhất, Zero-Leak và Kết nối thực tế WebSocket /ws/live tới Gemini Live API', async () => {
   const tmpStoreFile = path.join(
     os.tmpdir(),
     `glt-test-store-${crypto.randomBytes(6).toString('hex')}.json`
@@ -82,20 +83,33 @@ test('3. Server HTTP, Giao diện gọn 4 khối, Zero-Leak và Kết nối th�
 
     assert.ok(html.includes('id="btnToggleMic"'));
     assert.ok(html.includes('id="vnTranscriptBox"'));
+    assert.ok(html.includes('id="vnPendingBox"'));
+    assert.ok(html.includes('id="vnLiveBufferBox"'));
+    assert.ok(html.includes('id="enPlaybackBanner"'));
     assert.ok(html.includes('id="enTranscriptBox"'));
+    assert.ok(html.includes('id="rollingStatus"'));
     assert.ok(html.includes('id="speedSlider"'));
     assert.ok(html.includes('id="latencyList"'));
     assert.ok(html.includes('id="profileBar"'));
+    assert.ok(html.includes('id="profileSearchInput"'));
+    assert.ok(html.includes('id="profileSortSelect"'));
     assert.ok(html.includes('id="btnAddProfile"'));
     assert.ok(html.includes('id="profileFormDrawer"'));
+    assert.ok(html.includes('id="profileVoiceGenderGroup"'));
     assert.ok(html.includes('id="profileDeleteConfirm"'));
+    assert.ok(html.includes('Tuấn Anh'));
 
     const vnIdx = html.indexOf('id="vnTranscriptBox"');
     const enIdx = html.indexOf('id="enTranscriptBox"');
     const profileIdx = html.indexOf('id="profileBar"');
     const micIdx = html.indexOf('id="btnToggleMic"');
     const latencyIdx = html.indexOf('id="latencyList"');
-    assert.ok(vnIdx < enIdx && enIdx < profileIdx && profileIdx < micIdx && micIdx < latencyIdx);
+    assert.ok(
+      vnIdx < enIdx &&
+        enIdx < profileIdx &&
+        profileIdx < micIdx &&
+        micIdx < latencyIdx
+    );
 
     // Kiểm thử kết nối thực tế /ws/live tới Gemini Live API
     await new Promise((resolve, reject) => {
@@ -115,6 +129,7 @@ test('3. Server HTTP, Giao diện gọn 4 khối, Zero-Leak và Kết nối th�
             type: 'start',
             model: 'gemini-3.8-live',
             profileId: 'default',
+            voiceGender: 'male',
             filterFillers: true,
           })
         );
@@ -127,6 +142,7 @@ test('3. Server HTTP, Giao diện gọn 4 khối, Zero-Leak và Kết nối th�
           ws.close();
           reject(new Error(`WebSocket returned error: ${msg.message}`));
         } else if (msg.type === 'status' && msg.status === 'connected') {
+          assert.equal(msg.voiceName, 'Puck');
           ws.send(JSON.stringify({ type: 'text', text: 'À ừm, bạn tên là gì?' }));
         } else if (msg.type === 'input_transcription') {
           vnOut += msg.text;
@@ -160,7 +176,7 @@ test('3. Server HTTP, Giao diện gọn 4 khối, Zero-Leak và Kết nối th�
   }
 });
 
-test('4. Quản lý Hồ sơ API đa phiên, mã hóa AES-256-GCM, phân quyền chủ sở hữu, giới hạn thử PIN và chống vượt quyền bằng profile ID', async () => {
+test('4. Quản lý Hồ sơ API ("Tuấn Anh" mặc định, chọn giọng Nam/Nữ cố định), mã hóa AES-256-GCM, phân quyền chủ sở hữu và giới hạn thử PIN', async () => {
   const tmpStoreFile = path.join(
     os.tmpdir(),
     `glt-profile-sec-${crypto.randomBytes(6).toString('hex')}.json`
@@ -199,17 +215,34 @@ test('4. Quản lý Hồ sơ API đa phiên, mã hóa AES-256-GCM, phân quyền
     const dataA1 = await listResA1.json();
     assert.equal(dataA1.profiles.length, 1);
     assert.equal(dataA1.profiles[0].id, 'default');
-    assert.equal(dataA1.profiles[0].name, 'Tôi');
+    assert.equal(dataA1.profiles[0].name, 'Tuấn Anh');
     assert.equal(dataA1.profiles[0].locked, true);
+    assert.equal(dataA1.profiles[0].voiceGender, 'male');
+    assert.equal(dataA1.profiles[0].voiceName, 'Puck');
+    assert.equal(dataA1.profiles[0].voiceLabel, 'Nam');
 
-    // Không thể xóa hồ sơ "Tôi" (default)
+    // Không thể xóa hồ sơ "Tuấn Anh" (default)
     const delDefaultRes = await fetch(`${baseUrl}/api/profiles/default`, {
       method: 'DELETE',
       headers: { Cookie: cookieA },
     });
     assert.equal(delDefaultRes.status, 403);
 
-    // Phiên A tạo hồ sơ "Minh" có PIN "1234"
+    // Không thể đặt tên trùng "Tuấn Anh" hoặc "Tôi"
+    const reservedRes = await fetch(`${baseUrl}/api/profiles`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: cookieA,
+      },
+      body: JSON.stringify({
+        name: 'Tuấn Anh',
+        apiKey: 'AIzaSyReservedTestKey123456789',
+      }),
+    });
+    assert.equal(reservedRes.status, 400);
+
+    // Phiên A tạo hồ sơ "Minh" giọng Nữ ("female" -> "Kore") có PIN "1234"
     const secretKeyMinh = 'AIzaSyTestSecretKeyForMinh987654321';
     const createMinhRes = await fetch(`${baseUrl}/api/profiles`, {
       method: 'POST',
@@ -221,6 +254,7 @@ test('4. Quản lý Hồ sơ API đa phiên, mã hóa AES-256-GCM, phân quyền
         name: 'Minh',
         apiKey: secretKeyMinh,
         pin: '1234',
+        voiceGender: 'female',
       }),
     });
     assert.equal(createMinhRes.status, 201);
@@ -231,6 +265,9 @@ test('4. Quản lý Hồ sơ API đa phiên, mã hóa AES-256-GCM, phân quyền
     assert.equal(minhProfile.isOwner, true);
     assert.equal(minhProfile.selectable, true);
     assert.equal(minhProfile.hasPin, true);
+    assert.equal(minhProfile.voiceGender, 'female');
+    assert.equal(minhProfile.voiceName, 'Kore');
+    assert.equal(minhProfile.voiceLabel, 'Nữ');
 
     // Đảm bảo response và file lưu trữ bền vững KHÔNG chứa raw API key hoặc PIN
     const responseText = JSON.stringify(createdMinhData);
@@ -251,6 +288,8 @@ test('4. Quản lý Hồ sơ API đa phiên, mã hóa AES-256-GCM, phân quyền
     assert.equal(minhInB.isOwner, false);
     assert.equal(minhInB.selectable, false);
     assert.equal(minhInB.ownerNote, 'Chỉ chủ hồ sơ');
+    assert.equal(minhInB.voiceGender, 'female');
+    assert.equal(minhInB.voiceLabel, 'Nữ');
 
     // Phiên B cố tình gọi thẳng /api/ephemeral-token với profileId của Minh -> Bị chặn 403
     const stealTokRes = await fetch(`${baseUrl}/api/ephemeral-token`, {
@@ -282,7 +321,7 @@ test('4. Quản lý Hồ sơ API đa phiên, mã hóa AES-256-GCM, phân quyền
     );
     assert.equal(stealDelRes.status, 403);
 
-    // Phiên A (chủ sở hữu) gọi /api/ephemeral-token cho "Minh" -> Thành công với đúng key của Minh
+    // Phiên A (chủ sở hữu) gọi /api/ephemeral-token cho "Minh" -> Thành công với đúng key của Minh và giọng Kore (Nữ)
     const ownerTokRes = await fetch(`${baseUrl}/api/ephemeral-token`, {
       method: 'POST',
       headers: {
@@ -297,6 +336,9 @@ test('4. Quản lý Hồ sơ API đa phiên, mã hóa AES-256-GCM, phân quyền
     assert.equal(ownerTokRes.status, 200);
     const ownerTokData = await ownerTokRes.json();
     assert.equal(ownerTokData.profileId, minhProfile.id);
+    assert.equal(ownerTokData.voiceGender, 'female');
+    assert.equal(ownerTokData.voiceName, 'Kore');
+    assert.equal(ownerTokData.voiceLabel, 'Nữ');
     assert.equal(usedKeys.at(-1).activeKey, secretKeyMinh);
 
     // Phiên A tạo hồ sơ có key lỗi -> Khi lấy token phải báo lỗi của hồ sơ đó, KHÔNG tự chuyển sang key chủ web và KHÔNG lộ key trong lỗi
@@ -412,6 +454,130 @@ test('4. Quản lý Hồ sơ API đa phiên, mã hóa AES-256-GCM, phân quyền
       }
     );
     assert.equal(lockedTryRightPin.status, 429);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(tmpStoreFile, { force: true });
+  }
+});
+
+test('5. Kiểm thử chịu tải 20 người dùng đồng thời (20 Concurrent Users) tạo hồ sơ, truy vấn danh sách và cấp Ephemeral Token không bị lag hay mất dữ liệu', async () => {
+  const tmpStoreFile = path.join(
+    os.tmpdir(),
+    `glt-20users-${crypto.randomBytes(6).toString('hex')}.json`
+  );
+  const { server } = createTranslatorServer({
+    apiKey: 'SERVER_DEFAULT_OWNER_KEY_20USERS',
+    profileStoreOptions: {
+      filePath: tmpStoreFile,
+      encryptionKey: 'concurrent-20-encryption-secret!!',
+      sessionSecret: 'concurrent-20-session-hmac-sec!!',
+    },
+    createEphemeralTokenFn: async ({ activeKey, profileId }) => {
+      await new Promise((r) => setTimeout(r, 15));
+      return `tok_${profileId}_${activeKey.slice(-6)}`;
+    },
+  });
+
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  try {
+    const USER_COUNT = 20;
+    const startMs = performance.now();
+
+    // 1. 20 người dùng mở trang cùng lúc để nhận phiên riêng
+    const initResponses = await Promise.all(
+      Array.from({ length: USER_COUNT }, () => fetch(`${baseUrl}/api/profiles`))
+    );
+    const userSessions = initResponses.map((res, idx) => {
+      assert.equal(res.status, 200);
+      const cookie = extractCookieHeader(res);
+      assert.ok(cookie.includes('glt_owner_session='));
+      return {
+        index: idx + 1,
+        name: `Người dùng ${idx + 1}`,
+        voiceGender: idx % 2 === 0 ? 'male' : 'female',
+        apiKey: `AIzaSyConcurrentUserKey_${String(idx + 1).padStart(2, '0')}_987654`,
+        pin: String(1000 + idx),
+        cookie,
+      };
+    });
+
+    // 2. 20 người dùng đồng thời bấm "Lưu & Dùng" cùng một thời điểm
+    const createResults = await Promise.all(
+      userSessions.map(async (u) => {
+        const res = await fetch(`${baseUrl}/api/profiles`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Cookie: u.cookie,
+          },
+          body: JSON.stringify({
+            name: u.name,
+            apiKey: u.apiKey,
+            pin: u.pin,
+            voiceGender: u.voiceGender,
+          }),
+        });
+        const body = await res.json();
+        assert.equal(res.status, 201, `User ${u.index} create failed: ${JSON.stringify(body)}`);
+        return { user: u, profile: body.profile };
+      })
+    );
+
+    assert.equal(createResults.length, USER_COUNT);
+
+    // 3. Kiểm tra không mất bất kỳ hồ sơ nào (1 mặc định "Tuấn Anh" + 20 hồ sơ mới = 21)
+    const verifyListRes = await fetch(`${baseUrl}/api/profiles`, {
+      headers: { Cookie: userSessions[0].cookie },
+    });
+    const verifyListData = await verifyListRes.json();
+    assert.equal(verifyListData.profiles.length, USER_COUNT + 1);
+    assert.equal(verifyListData.profiles[0].name, 'Tuấn Anh');
+
+    // 4. 20 người dùng đồng thời lấy Ephemeral Token + tải danh sách hồ sơ cùng lúc (40 requests song song)
+    const parallelOpsStart = performance.now();
+    const tokenResults = await Promise.all(
+      createResults.map(async ({ user, profile }) => {
+        const [tokRes, listRes] = await Promise.all([
+          fetch(`${baseUrl}/api/ephemeral-token`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Cookie: user.cookie,
+            },
+            body: JSON.stringify({
+              model: 'gemini-3.8-live',
+              profileId: profile.id,
+            }),
+          }),
+          fetch(`${baseUrl}/api/profiles`, {
+            headers: { Cookie: user.cookie },
+          }),
+        ]);
+        assert.equal(tokRes.status, 200);
+        assert.equal(listRes.status, 200);
+        const tokData = await tokRes.json();
+        assert.equal(tokData.profileId, profile.id);
+        assert.equal(tokData.voiceGender, user.voiceGender);
+        assert.equal(
+          tokData.voiceName,
+          user.voiceGender === 'female' ? 'Kore' : 'Puck'
+        );
+        assert.ok(tokData.token.endsWith(user.apiKey.slice(-6)));
+        return tokData;
+      })
+    );
+    const parallelOpsDurationMs = performance.now() - parallelOpsStart;
+    assert.equal(tokenResults.length, USER_COUNT);
+    assert.ok(
+      parallelOpsDurationMs < 3000,
+      `40 requests đồng thời từ 20 người dùng phải xử lý nhanh (<3000ms), thực tế: ${Math.round(parallelOpsDurationMs)}ms`
+    );
+
+    const totalElapsed = performance.now() - startMs;
+    assert.ok(totalElapsed < 8000);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     fs.rmSync(tmpStoreFile, { force: true });
