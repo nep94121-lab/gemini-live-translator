@@ -425,6 +425,7 @@ test('4. Quản lý Hồ sơ API đa phiên, mã hóa AES-256-GCM, phân quyền
     'api/config.js',
     'api/ephemeral-token.js',
     'api/profiles.js',
+    'api/profiles/[id].js',
     'public/index.html',
     'public/style.css',
     'public/app.js',
