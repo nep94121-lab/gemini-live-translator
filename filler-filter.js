@@ -12,11 +12,21 @@ CRITICAL RULES:
    - "Bạn khỏe không?" -> "How are you?"
    - "Mấy giờ rồi?" -> "What time is it?"
    - "Hãy giúp tôi việc này." -> "Please help me with this."
-4. DISFLUENCY & NOISE FILTER: Completely ignore hesitation sounds, Vietnamese filler words ("à", "ừ", "ờ", "ừm", "ạ ừm", "ờm", "ưm", "kiểu như"), throat clearing, breathing, or background noise.
+4. DISFLUENCY & NOISE FILTER: Completely ignore hesitation sounds, Vietnamese filler words ("à", "ừ", "ờ", "ừm", "ạ ừm", "ờm", "ưm", "kiểu như"), throat clearing, or breathing noise.
    - If the input consists only of filler sounds ("à...", "ừm...", "ạ ừm"), remain completely silent and output NOTHING.
    - When translating a sentence containing fillers or self-corrections, output ONLY the clean, fluent English translation without "uh" or "um".
-5. Speak at a brisk, natural, clear pace without any preamble or commentary.
+5. Output ONLY the translated English words themselves. NEVER say "The translation is:" or "The English translation is:". Speak at a brisk, natural, clear pace without any preamble or commentary.
 6. VOICE CONSISTENCY: Always speak in a single, steady, consistent vocal tone, pitch, and persona throughout the entire session. Never switch voices, genders, accents, or vocal registers between sentences.`;
+
+export function stripLiveControlTokens(text = '') {
+  return String(text || '')
+    .replace(/<\/?speak\b[^>]*>/gi, '')
+    .replace(/<(?:no\s*speech|already\s*[a-z-]+|noise|silence|laugh|sigh|cough)>/gi, '')
+    .replace(/\[(?:en|vi|pause|silence|noise)\]/gi, '')
+    .replace(/\{(?:pause|silence|noise)\}|\((?:pause|silence|noise)\)/gi, '')
+    .replace(/[🧠✨]/gu, '')
+    .replace(/^(?:the\s+(?:english\s+)?translation\s+is\s*[:\-–—]?\s*)/i, '');
+}
 
 const STANDALONE_FILLER_REGEX = /^[\s,.;:!?…\-–—]*(?:à+|ừ+|ờ+|ừm+|ờm+|ưm+|ạ+|ơ+|hơ+|ờ\s*hơ+|ạ\s*ừm+|à\s*ừm+|à\s*ừ+|ừ\s*à+|uh+|um+|hmm+|er+|ah+)[\s,.;:!?…\-–—]*$/i;
 
@@ -30,9 +40,8 @@ const TOKEN_FILLER_REGEX = /(?:^|(?<=[\s,.;:!?…\-–—]))(?:ạ\s+ừm+|à\s+
  */
 export function cleanVietnameseFillers(rawText, enabled = true) {
   if (!rawText || typeof rawText !== 'string') return '';
-  if (!enabled) return rawText.trim();
-
-  let text = rawText.trim();
+  let text = stripLiveControlTokens(rawText).trim();
+  if (!enabled) return text;
   if (!text) return '';
 
   if (STANDALONE_FILLER_REGEX.test(text)) {

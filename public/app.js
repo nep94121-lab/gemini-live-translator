@@ -119,6 +119,8 @@ export const enTurns = [];
 let playbackSyncTimer = null;
 
 let isModelGeneratingTurn = false;
+let generationGuardTimer = null;
+let isFlushingRollingQueue = false;
 let rollingInputQueue = [];
 let pendingLiveVnText = '';
 let isCapturingRollingSpeech = false;
@@ -142,7 +144,7 @@ function showFeedback(message) {
 function setInputLevel(rms = 0) {
   inputMeter.style.setProperty(
     '--input-level',
-    Math.min(1, Math.max(0, rms * 14))
+    Math.min(1, Math.max(0, rms * 28))
   );
 }
 
@@ -232,11 +234,32 @@ voiceGenderFemaleBtn?.addEventListener('click', () => {
   setFormVoiceGender('female');
 });
 
+function clearGenerationGuard() {
+  if (generationGuardTimer) {
+    clearTimeout(generationGuardTimer);
+    generationGuardTimer = null;
+  }
+}
+
+function armGenerationGuard(timeoutMs = 2600) {
+  clearGenerationGuard();
+  generationGuardTimer = setTimeout(() => {
+    generationGuardTimer = null;
+    if (isModelGeneratingTurn) {
+      isModelGeneratingTurn = false;
+      syncRollingIndicators();
+      flushRollingInputQueue();
+    }
+  }, timeoutMs);
+}
+
 function closeActiveLiveClientSession() {
+  clearGenerationGuard();
   if (!liveClientSession) return;
   const prev = liveClientSession;
   liveClientSession = null;
   isModelGeneratingTurn = false;
+  isFlushingRollingQueue = false;
   rollingInputQueue = [];
   try {
     prev.close();
@@ -1625,55 +1648,71 @@ document.addEventListener('visibilitychange', async () => {
   if (bgKeepAliveAudio?.paused) bgKeepAliveAudio.play().catch(() => {});
 });
 
-function flushRollingInputQueue() {
-  if (!liveClientSession || isModelGeneratingTurn || rollingInputQueue.length === 0) {
+async function flushRollingInputQueue() {
+  if (
+    !liveClientSession ||
+    isModelGeneratingTurn ||
+    isFlushingRollingQueue ||
+    rollingInputQueue.length === 0
+  ) {
     return;
   }
 
-  const queuedItems = rollingInputQueue.splice(0, rollingInputQueue.length);
-  isCapturingRollingSpeech = false;
+  isFlushingRollingQueue = true;
+  try {
+    await new Promise((r) => setTimeout(r, 90));
+    if (!liveClientSession || isModelGeneratingTurn) return;
 
-  const textEntry = queuedItems.find((item) => typeof item.text === 'string');
-  if (textEntry) {
-    showPendingVnBuffer('');
-    currentTurnStartMs = performance.now();
-    currentTurnFirstByteMs = null;
-    currentVnItem = appendOrUpdateUtterance(
-      vnTranscriptBox,
-      null,
-      textEntry.text,
-      `#${turnCounter + 1}`,
-      true,
-      'translating'
-    );
-    isModelGeneratingTurn = true;
-    liveClientSession.sendRealtimeInput({ text: textEntry.text });
-    return;
-  }
+    while (rollingInputQueue.length > 0 && !isModelGeneratingTurn && liveClientSession) {
+      const item = rollingInputQueue.shift();
+      if (!item) continue;
 
-  if (pendingLiveVnText) {
-    showPendingVnBuffer('');
-  }
+      if (typeof item.text === 'string') {
+        showPendingVnBuffer('');
+        currentTurnStartMs = performance.now();
+        currentTurnFirstByteMs = null;
+        currentVnItem = appendOrUpdateUtterance(
+          vnTranscriptBox,
+          null,
+          item.text,
+          `#${turnCounter + 1}`,
+          true,
+          'translating'
+        );
+        isModelGeneratingTurn = true;
+        armGenerationGuard(5500);
+        liveClientSession.sendRealtimeInput({ text: item.text });
+        break;
+      }
 
-  let hasStreamEnd = false;
-  for (const item of queuedItems) {
-    if (item.audio) {
-      liveClientSession.sendRealtimeInput({ audio: item.audio });
+      if (item.audio) {
+        liveClientSession.sendRealtimeInput({ audio: item.audio });
+        await new Promise((r) => setTimeout(r, 16));
+      } else if (item.audioStreamEnd) {
+        isCapturingRollingSpeech = false;
+        showPendingVnBuffer('');
+        currentTurnStartMs = performance.now();
+        currentTurnFirstByteMs = null;
+        isModelGeneratingTurn = true;
+        armGenerationGuard(2600);
+        liveClientSession.sendRealtimeInput({ audioStreamEnd: true });
+        break;
+      }
     }
-    if (item.audioStreamEnd) {
-      hasStreamEnd = true;
-      currentTurnStartMs = performance.now();
-      currentTurnFirstByteMs = null;
-      liveClientSession.sendRealtimeInput({ audioStreamEnd: true });
-    }
-  }
-  if (hasStreamEnd) {
-    isModelGeneratingTurn = true;
+  } finally {
+    isFlushingRollingQueue = false;
+    syncRollingIndicators();
   }
 }
 
 function stripSsmlTags(text = '') {
-  return String(text || '').replace(/<\/?speak\b[^>]*>/gi, '');
+  return String(text || '')
+    .replace(/<\/?speak\b[^>]*>/gi, '')
+    .replace(/<(?:no\s*speech|already\s*[a-z-]+|noise|silence|laugh|sigh|cough)>/gi, '')
+    .replace(/\[(?:en|vi|pause|silence|noise)\]/gi, '')
+    .replace(/\{(?:pause|silence|noise)\}|\((?:pause|silence|noise)\)/gi, '')
+    .replace(/[🧠✨]/gu, '')
+    .replace(/^(?:the\s+(?:english\s+)?translation\s+is\s*[:\-–—]?\s*)/i, '');
 }
 
 export function handleServerResponse(response) {
@@ -1682,7 +1721,7 @@ export function handleServerResponse(response) {
   const now = performance.now();
 
   if (content.inputTranscription?.text) {
-    const rawVn = content.inputTranscription.text;
+    const rawVn = stripSsmlTags(content.inputTranscription.text);
     const needsSpace =
       currentVnRawText.length > 0 &&
       !/\s$/.test(currentVnRawText) &&
@@ -1730,6 +1769,7 @@ export function handleServerResponse(response) {
 
   if (content.modelTurn?.parts) {
     isModelGeneratingTurn = true;
+    armGenerationGuard(6500);
     for (const part of content.modelTurn.parts) {
       if (part.inlineData?.data) {
         if (!currentTurnStartMs) currentTurnStartMs = now - 180;
@@ -1742,7 +1782,7 @@ export function handleServerResponse(response) {
         const turn = ensureCurrentEnTurn('');
         schedulePcm24kPlayback(part.inlineData.data, turn);
       }
-      if (part.text) {
+      if (part.text && !part.thought && !content.outputTranscription) {
         const cleanEn = stripSsmlTags(part.text);
         if (cleanEn) {
           if (!currentTurnStartMs) currentTurnStartMs = now - 180;
@@ -1759,6 +1799,7 @@ export function handleServerResponse(response) {
     const cleanOut = stripSsmlTags(content.outputTranscription.text);
     if (cleanOut) {
       isModelGeneratingTurn = true;
+      armGenerationGuard(6500);
       if (!currentTurnStartMs) currentTurnStartMs = now - 180;
       if (!currentTurnFirstByteMs) {
         currentTurnFirstByteMs = now;
@@ -1777,6 +1818,7 @@ export function handleServerResponse(response) {
   }
 
   if (content.turnComplete === true) {
+    clearGenerationGuard();
     isModelGeneratingTurn = false;
     if (currentVnItem) {
       setVnUtteranceState(currentVnItem, 'translated');
@@ -1856,11 +1898,6 @@ async function connectDirectGeminiLive() {
 
   const realtimeInputConfig = {
     activityHandling: 'NO_INTERRUPTION',
-    automaticActivityDetection: {
-      disabled: false,
-      silenceDurationMs: 450,
-      prefixPaddingMs: 120,
-    },
   };
 
   const isTranslateModel = model.includes('translate');
@@ -1903,12 +1940,16 @@ async function connectDirectGeminiLive() {
         handleServerResponse(response);
       },
       onerror: (err) => {
+        clearGenerationGuard();
+        isModelGeneratingTurn = false;
         setStatus('error', err?.message || 'Lỗi kết nối phiên dịch');
       },
       onclose: () => {
         if (!sessionRef || liveClientSession === sessionRef) {
           liveClientSession = null;
+          clearGenerationGuard();
           isModelGeneratingTurn = false;
+          isFlushingRollingQueue = false;
           if (!isRecording) {
             setStatus('idle', 'Đã ngắt kết nối');
           }
@@ -1969,15 +2010,11 @@ async function startLiveSession() {
 
     const highPass = micContext.createBiquadFilter();
     highPass.type = 'highpass';
-    highPass.frequency.value = 85;
-
-    const lowPass = micContext.createBiquadFilter();
-    lowPass.type = 'lowpass';
-    lowPass.frequency.value = 3400;
+    highPass.frequency.value = 60;
 
     workletNode = new AudioWorkletNode(micContext, 'pcm-noise-gate-processor');
     workletNode.port.postMessage({
-      noiseThreshold: parseFloat(noiseGateSlider.value) || 0.012,
+      noiseThreshold: parseFloat(noiseGateSlider.value) || 0.003,
     });
 
     workletNode.port.onmessage = (event) => {
@@ -1985,10 +2022,13 @@ async function startLiveSession() {
       if (data.type === 'pcm_chunk' || data.type === 'speech_start') {
         setInputLevel(data.rms);
       }
-      if (data.type === 'speech_end') setInputLevel(0);
+      if (data.type === 'speech_end' || data.type === 'speech_cancel') {
+        setInputLevel(0);
+      }
       if (!liveClientSession) return;
 
-      const rollingActive = isModelGeneratingTurn || isSpeakerPlaying();
+      const rollingActive =
+        isModelGeneratingTurn || isFlushingRollingQueue || isSpeakerPlaying();
 
       if (data.type === 'speech_start') {
         if (rollingActive) {
@@ -2001,12 +2041,23 @@ async function startLiveSession() {
           vnStatusTag.textContent = 'Đang nghe...';
         }
         syncRollingIndicators();
+      } else if (data.type === 'speech_cancel') {
+        isCapturingRollingSpeech = false;
+        if (!pendingLiveVnText) {
+          showPendingVnBuffer('');
+        }
+        vnStatusTag.textContent = isRecording ? 'Đang nghe' : 'Tiếng Việt';
+        syncRollingIndicators();
       } else if (data.type === 'pcm_chunk') {
         const audioPayload = {
           data: arrayBufferToBase64(data.pcm16),
           mimeType: 'audio/pcm;rate=16000',
         };
-        if (isModelGeneratingTurn) {
+        if (
+          isModelGeneratingTurn ||
+          isFlushingRollingQueue ||
+          rollingInputQueue.length > 0
+        ) {
           isCapturingRollingSpeech = true;
           if (!pendingLiveVnText) {
             showPendingVnBuffer('Đang thu âm câu tiếp theo...');
@@ -2017,12 +2068,20 @@ async function startLiveSession() {
         }
       } else if (data.type === 'speech_end') {
         isCapturingRollingSpeech = false;
-        if (isModelGeneratingTurn) {
+        if (
+          isModelGeneratingTurn ||
+          isFlushingRollingQueue ||
+          rollingInputQueue.length > 0
+        ) {
           rollingInputQueue.push({ audioStreamEnd: true });
+          if (!isModelGeneratingTurn && !isFlushingRollingQueue) {
+            flushRollingInputQueue();
+          }
         } else {
           currentTurnStartMs = performance.now();
           currentTurnFirstByteMs = null;
           isModelGeneratingTurn = true;
+          armGenerationGuard(2400);
           liveClientSession.sendRealtimeInput({
             audioStreamEnd: true,
           });
@@ -2032,8 +2091,7 @@ async function startLiveSession() {
     };
 
     source.connect(highPass);
-    highPass.connect(lowPass);
-    lowPass.connect(workletNode);
+    highPass.connect(workletNode);
 
     isRecording = true;
     btnToggleMic.classList.add('recording');
@@ -2057,7 +2115,9 @@ async function startLiveSession() {
 
 async function stopLiveSession() {
   isRecording = false;
+  clearGenerationGuard();
   isModelGeneratingTurn = false;
+  isFlushingRollingQueue = false;
   isCapturingRollingSpeech = false;
   rollingInputQueue = [];
   showPendingVnBuffer('');
@@ -2132,7 +2192,7 @@ speedSlider.addEventListener('input', () => {
 });
 
 noiseGateSlider.addEventListener('input', () => {
-  const val = parseFloat(noiseGateSlider.value) || 0.012;
+  const val = parseFloat(noiseGateSlider.value) || 0.003;
   noiseGateValueLabel.textContent = val.toFixed(3);
   if (workletNode) {
     workletNode.port.postMessage({ noiseThreshold: val });
@@ -2226,6 +2286,7 @@ quickTextForm.addEventListener('submit', async (e) => {
   currentTurnStartMs = performance.now();
   currentTurnFirstByteMs = null;
   isModelGeneratingTurn = true;
+  armGenerationGuard(5500);
 
   currentVnItem = appendOrUpdateUtterance(
     vnTranscriptBox,

@@ -8,6 +8,7 @@ import { GoogleGenAI, Modality } from '@google/genai';
 import {
   STRICT_TRANSLATOR_PROMPT,
   cleanVietnameseFillers,
+  stripLiveControlTokens,
 } from './filler-filter.js';
 import {
   createProfileStore,
@@ -426,10 +427,6 @@ export function createTranslatorServer(options = {}) {
           };
           const realtimeInputConfig = {
             activityHandling: 'NO_INTERRUPTION',
-            automaticActivityDetection: {
-              silenceDurationMs: 450,
-              prefixPaddingMs: 120,
-            },
           };
 
           const isTranslateModel = model.includes('translate');
@@ -466,19 +463,6 @@ export function createTranslatorServer(options = {}) {
             callbacks: {
               onopen: () => {},
               onmessage: (response) => {
-                if (response?.setupComplete && !isSessionReady) {
-                  isSessionReady = true;
-                  sendToClient({
-                    type: 'status',
-                    status: 'connected',
-                    model,
-                    profileId: resolved.profileId,
-                    profileName: resolved.profileName,
-                    voiceGender: resolved.voiceGender,
-                    voiceName: lockedVoiceName,
-                  });
-                }
-
                 const content = response?.serverContent;
                 if (!content) return;
 
@@ -494,12 +478,15 @@ export function createTranslatorServer(options = {}) {
                         serverTimestamp: Date.now(),
                       });
                     }
-                    if (part.text) {
-                      sendToClient({
-                        type: 'output_text',
-                        text: part.text,
-                        serverTimestamp: Date.now(),
-                      });
+                    if (part.text && !part.thought) {
+                      const cleanPartText = stripLiveControlTokens(part.text);
+                      if (cleanPartText) {
+                        sendToClient({
+                          type: 'output_text',
+                          text: cleanPartText,
+                          serverTimestamp: Date.now(),
+                        });
+                      }
                     }
                   }
                 }
@@ -521,12 +508,17 @@ export function createTranslatorServer(options = {}) {
                 }
 
                 if (content.outputTranscription?.text) {
-                  if (!isGeneratingTurn) markGenerating();
-                  sendToClient({
-                    type: 'output_transcription',
-                    text: content.outputTranscription.text,
-                    serverTimestamp: Date.now(),
-                  });
+                  const cleanOut = stripLiveControlTokens(
+                    content.outputTranscription.text
+                  );
+                  if (cleanOut) {
+                    if (!isGeneratingTurn) markGenerating();
+                    sendToClient({
+                      type: 'output_transcription',
+                      text: cleanOut,
+                      serverTimestamp: Date.now(),
+                    });
+                  }
                 }
 
                 if (content.interrupted === true) {

@@ -676,3 +676,108 @@ test('5. Kiểm thử chịu tải 20 người dùng đồng thời (20 Concurre
     );
   }
 });
+
+test('6. AudioWorklet PcmNoiseGateProcessor: Pre-roll 240ms, thu giọng nhỏ (RMS 0.0045), downsample 48kHz->16kHz, khử click <220ms (speech_cancel) và đuôi lặng 700ms', () => {
+  const workletCode = fs.readFileSync(
+    path.join(ROOT_DIR, 'public/audio-worklet.js'),
+    'utf8'
+  );
+
+  function loadProcessorClass(mockSampleRate) {
+    let RegisteredProcessor = null;
+    const fn = new Function(
+      'AudioWorkletProcessor',
+      'registerProcessor',
+      'sampleRate',
+      workletCode
+    );
+    class MockAudioWorkletProcessor {
+      constructor() {
+        this.events = [];
+        this.port = {
+          onmessage: null,
+          postMessage: (msg) => {
+            this.events.push(msg);
+          },
+        };
+      }
+    }
+    fn(
+      MockAudioWorkletProcessor,
+      (_name, cls) => {
+        RegisteredProcessor = cls;
+      },
+      mockSampleRate
+    );
+    return RegisteredProcessor;
+  }
+
+  // 1. Kiểm thử ở 16kHz với giọng nói nhỏ thực tế (amplitude 0.005 < ngưỡng cũ 0.012)
+  const Processor16k = loadProcessorClass(16000);
+  const proc = new Processor16k();
+
+  const makeBlock = (amp, len = 128) => {
+    const arr = new Float32Array(len);
+    for (let i = 0; i < len; i++) {
+      arr[i] = i % 2 === 0 ? amp : -amp;
+    }
+    return [[arr]];
+  };
+
+  // Đẩy 30 block im lặng (240ms) làm dữ liệu pre-roll
+  for (let i = 0; i < 30; i++) {
+    proc.process(makeBlock(0.0002));
+  }
+  assert.equal(proc.events.length, 0);
+
+  // Đẩy 50 block giọng nói nhỏ (amp = 0.005, tương đương ~400ms > minVoiceMs 220ms)
+  for (let i = 0; i < 50; i++) {
+    proc.process(makeBlock(0.005));
+  }
+  assert.equal(proc.events[0]?.type, 'speech_start');
+  const pcmEventsDuringSpeech = proc.events.filter(
+    (e) => e.type === 'pcm_chunk'
+  );
+  assert.ok(
+    pcmEventsDuringSpeech.length >= 2,
+    'Phải xả Pre-roll 240ms + các chunk PCM đang nói'
+  );
+
+  // Đẩy 120 block im lặng (~960ms > silenceMsThreshold 850ms) để kích hoạt speech_end + đuôi lặng 700ms
+  for (let i = 0; i < 120; i++) {
+    proc.process(makeBlock(0.0001));
+  }
+  assert.equal(proc.events.at(-1)?.type, 'speech_end');
+  const totalPcmBytes = proc.events
+    .filter((e) => e.type === 'pcm_chunk')
+    .reduce((sum, e) => sum + e.pcm16.byteLength, 0);
+  assert.ok(
+    totalPcmBytes >= (3840 + 6400 + 11200) * 2,
+    'Tổng dữ liệu PCM phải bao gồm Pre-roll 240ms + giọng nói + đuôi lặng 700ms (11200 mẫu Int16)'
+  );
+
+  // 2. Kiểm thử tạp âm/click ngắn (< 220ms) phải phát speech_cancel thay vì speech_end
+  proc.events.length = 0;
+  for (let i = 0; i < 10; i++) {
+    proc.process(makeBlock(0.008)); // ~80ms (< 220ms)
+  }
+  for (let i = 0; i < 120; i++) {
+    proc.process(makeBlock(0.0001));
+  }
+  assert.ok(proc.events.some((e) => e.type === 'speech_cancel'));
+  assert.equal(
+    proc.events.some((e) => e.type === 'speech_end'),
+    false,
+    'Click ngắn dưới 220ms không được phát speech_end gây kẹt trạng thái'
+  );
+
+  // 3. Kiểm thử downsample tự động khi phần cứng chạy ở 48000 Hz
+  const Processor48k = loadProcessorClass(48000);
+  const proc48 = new Processor48k();
+  for (let i = 0; i < 150; i++) {
+    proc48.process(makeBlock(0.006, 128));
+  }
+  const chunks48 = proc48.events.filter((e) => e.type === 'pcm_chunk');
+  assert.ok(chunks48.length >= 1, '48kHz phải downsample về 16kHz và phát pcm_chunk');
+});
+
